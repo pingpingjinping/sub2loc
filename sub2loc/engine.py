@@ -105,6 +105,7 @@ class Engine:
         outputs = [(item['name'], bytes.fromhex(item['hex'])) for item in state['outputs']]
         # Validate every file before making the first API request.
         documents = [AssDocument(raw, config['encoding'], hide_readings=config.get('hide_readings', False)) for _, raw in files]
+        strategy_state = {}
         for (name, _), doc in zip(files, documents):
             if doc.reading_count:
                 action = '숨김' if config.get('hide_readings', False) else '유지'
@@ -121,7 +122,8 @@ class Engine:
                 if mode == 'ja-ko-vn':
                     context_tokens = config.get('context_tokens', 4096)
                     end = choose_end(cues, start, config['batch_size'], config['notes'],
-                                     state.get('recent_pairs', []), config['max_tokens'], context_tokens)
+                                     state.get('recent_pairs', []), config['max_tokens'], context_tokens,
+                                     preserve_controls=not strategy_state.get('span_only', False))
                     def check_cancel():
                         if cancel.is_set():
                             raise Cancelled('번역을 중단했습니다. 저장된 묶음부터 재개할 수 있습니다.')
@@ -140,7 +142,8 @@ class Engine:
                     try:
                         translate_adaptive(cues[start:end], client, config['notes'], state.get('recent_pairs', []),
                                            config['max_tokens'], context_tokens, on_chunk=commit,
-                                           progress=report, check_cancel=check_cancel, cancel=cancel)
+                                           progress=report, check_cancel=check_cancel, cancel=cancel,
+                                           strategy_state=strategy_state)
                     except OutputLimitError as exc:
                         exc.filename = name
                         raise

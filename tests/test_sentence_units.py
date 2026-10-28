@@ -55,6 +55,25 @@ class SentenceUnitTests(unittest.TestCase):
             self.assertNotIn('999', result); self.assertIn(r'{\pos(50,80)}고양이{\fscx50}들', result)
             self.assertTrue(any('구간별' in d.get('message', '') for d in updates))
 
+    def test_failed_tagged_native_request_is_not_repeated_across_batches_and_files(self):
+        raw = ass([r'{\pos(50,80)}' + word + r'{\fscx50}たち' for word in ('猫', '犬', '鳥', '牛', '馬')])
+        class Model:
+            def __init__(self, reject): self.calls = []; self.reject = reject
+            def complete_text(self, prompt, limit):
+                text = source(prompt); self.calls.append(text)
+                return text.replace(r'\pos(50,80)', r'\pos(999,999)') if self.reject and '{' in text else text
+        for reject in (True, False):
+            with self.subTest(reject=reject), tempfile.TemporaryDirectory() as folder:
+                cfg = dict(config(), batch_size=2); model = Model(reject); engine = Engine(Path(folder))
+                files = [('first.ass', raw), ('second.ass', raw)]
+                outputs, _ = engine.translate(cfg, files, client=model)
+                native = [text for text in model.calls if '{' in text]
+                self.assertEqual(len(native), 1 if reject else 6)
+                self.assertTrue(all(result == raw for _, result in outputs))
+                count = len(model.calls)
+                engine.translate(cfg, files, client=model)
+                self.assertEqual(len(model.calls), count)
+
     def test_readings_opt_in_comments_original_rows_and_preserves_encoding_and_controls(self):
         raw = ass([r'{\pos(80,42)\fscx50\fscy50}ねこ', r'{\pos(40,96)}猫が来た。',
                    r'{\pos(50,42)\fscx50}ああ', r'{\pos(60,42)\fscx50\fscy50}Hi'])

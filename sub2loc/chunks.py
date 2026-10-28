@@ -75,11 +75,12 @@ def make_plan(cue, budget):
     return CuePlan(cue, parts)
 
 
-def choose_end(cues, start, batch_size, notes, pairs, max_tokens, context_tokens):
+def choose_end(cues, start, batch_size, notes, pairs, max_tokens, context_tokens, *, preserve_controls=True):
     budget = source_budget(notes, pairs, max_tokens, context_tokens)
     used, end = 0, start
     while end < len(cues) and end - start < batch_size:
-        cost = len(cues[end].restore(cues[end].text).encode('utf-8')) + 1
+        cost = (len(cues[end].restore(cues[end].text).encode('utf-8')) + 1 if preserve_controls else
+                sum(len(p.source.encode('utf-8')) + 1 for p in make_plan(cues[end], budget).pieces))
         if end > start and used + cost > budget:
             break
         used += cost; end += 1
@@ -88,9 +89,10 @@ def choose_end(cues, start, batch_size, notes, pairs, max_tokens, context_tokens
 
 def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *,
                        on_chunk, progress=lambda **kwargs: None, check_cancel=lambda: None,
-                       cancel=None):
+                       cancel=None, strategy_state=None):
     """Commit each validated subchunk immediately; failed results never shift rows."""
     cancel = cancel or threading.Event()
+    strategy_state = strategy_state if strategy_state is not None else {}
     budget = source_budget(notes, pairs, max_tokens, context_tokens)
     plans = [make_plan(cue, budget) for cue in cues]
 
@@ -146,8 +148,35 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
             result.update(translate_pieces(pieces[mid:], history, cue_id))
             return result
 
+    def accept(group, translated, history):
+        context = ''
+        for plan in group:
+            history, context = remember(plan.cue, translated[str(plan.cue.id)], history)
+        on_chunk([plan.cue for plan in group], translated, history, context)
+        return history
+
+    def run_spans(group, history):
+        check_cancel()
+        pieces = [piece for plan in group for piece in plan.pieces]
+        try:
+            values = request(pieces, history, group[0].cue.id + 1, group[-1].cue.id + 1) if pieces else {}
+            translated = {str(plan.cue.id): plan.render(values) for plan in group}
+        except (OutputLimitError, ValueError) as exc:
+            if len(group) > 1:
+                split_reason(exc, len(group)); mid = len(group) // 2
+                history = run_spans(group[:mid], history)
+                return run_spans(group[mid:], history)
+            if len(pieces) <= 1: raise
+            split_reason(exc, len(pieces)); mid = len(pieces) // 2
+            values = translate_pieces(pieces[:mid], history, group[0].cue.id + 1)
+            values.update(translate_pieces(pieces[mid:], history, group[0].cue.id + 1))
+            translated = {str(group[0].cue.id): group[0].render(values)}
+        return accept(group, translated, history)
+
     def run(group, history):
         check_cancel()
+        if strategy_state.get('span_only'):
+            return run_spans(group, history)
         pieces = [piece for plan in group for piece in plan.pieces]
         try:
             # Keep the complete cue in one model input, including its original
@@ -165,6 +194,14 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
                 plan.cue.restore(masked)
                 translated[str(plan.cue.id)] = masked
         except (OutputLimitError, ValueError) as exc:
+            # Do not spend a whole run repeatedly generating/rejecting long ASS
+            # controls. Once a tagged native request fails, use the existing
+            # bounded span path for this work's remaining requests and files.
+            if any(plan.cue.protected for plan in group) and not isinstance(exc, PromptError):
+                strategy_state['span_only'] = True
+                progress(phase='retry', message=str(exc).splitlines()[0] +
+                         ' · 태그 포함 문장 요청을 이번 작품 실행에서 중단하고 보호 구간별 번역으로 전환합니다')
+                return run_spans(group, history)
             if len(group) > 1:
                 split_reason(exc, len(group))
                 mid = len(group) // 2
@@ -178,11 +215,7 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
             progress(phase='retry', message=str(exc).splitlines()[0] + ' · 보호 구간별 번역으로 전환합니다')
             values = translate_pieces(pieces, history, group[0].cue.id + 1)
             translated = {str(group[0].cue.id): group[0].render(values)}
-        context = ''
-        for plan in group:
-            history, context = remember(plan.cue, translated[str(plan.cue.id)], history)
         # Persistence/encoding failures are deliberately outside the recovery try.
-        on_chunk([plan.cue for plan in group], translated, history, context)
-        return history
+        return accept(group, translated, history)
 
     return run(plans, pairs)
