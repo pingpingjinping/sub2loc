@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import re
 import time
-from .api import ApiError, ChatResult, RequestError, StreamInterrupted
+from .api import ApiError, ChatResult, RequestError, StreamInterrupted, safe_preview
 from .ass import AssDocument, TOKEN
 from .engine import atomic_json, digest, Cancelled
 from .profiles import template_for
@@ -48,30 +48,69 @@ def project_lock(path):
             else: fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def parse_rows(raw, expected):
-    """Salvage only complete JSON records; never fall back to positional order."""
-    found, duplicate, unknown = {}, set(), set()
-    raw = raw.strip()
-    if raw.startswith('```') and raw.endswith('```'):
-        raw = raw.split('\n',1)[1].rsplit('```',1)[0].strip()
-    try: items = [json.loads(raw)]
-    except (ValueError, TypeError):
-        items = []
+def response_items(raw):
+    """Decode complete top-level JSON values, including pretty JSONL/fences.
+
+    Never scan for braces inside a value or infer a positional ID. A malformed
+    trailing value stays unparsed; completed earlier values may be salvaged.
+    """
+    decoder = json.JSONDecoder()
+    raw = raw.strip(); items = []; pos = 0
+    while pos < len(raw):
+        while pos < len(raw) and raw[pos].isspace(): pos += 1
+        fence = re.match(r'```(?:jsonl?|ndjson)?[ \t]*(?:\r?\n|$)',raw[pos:],re.IGNORECASE)
+        if fence:
+            pos += fence.end(); continue
+        try: item, pos = decoder.raw_decode(raw,pos)
+        except ValueError: break
+        items.append(item)
+    if not items:
+        # Preserve support for complete one-line records around plain prose.
         for line in raw.splitlines():
             try: items.append(json.loads(line))
             except (ValueError,TypeError): continue
-    for item in items:
-        rows = item if isinstance(item, list) else item.get('translations', [item]) if isinstance(item, dict) else []
-        if not isinstance(rows, list): continue
-        for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get('id'), str): continue
+    return items
+
+
+def item_rows(item):
+    rows = item if isinstance(item,list) else item.get('translations',[item]) if isinstance(item,dict) else []
+    return rows if isinstance(rows,list) else []
+
+
+def parse_rows(raw, expected):
+    """Salvage only complete JSON records; never fall back to positional order."""
+    found, duplicate, unknown = {}, set(), set()
+    for item in response_items(raw):
+        for row in item_rows(item):
+            if not isinstance(row,dict) or not isinstance(row.get('id'),str): continue
             identity = row['id']
             if identity not in expected:
                 unknown.add(identity); continue
             if identity in found: duplicate.add(identity)
             found[identity] = row.get('text')
-    for identity in duplicate: found.pop(identity, None)
-    return found, duplicate, unknown
+    for identity in duplicate: found.pop(identity,None)
+    return found,duplicate,unknown
+
+
+class ResponseFormatError(ValueError):
+    """A run-wide protocol failure with bounded, copyable diagnostic data."""
+    def __init__(self,diagnostic,path):
+        self.diagnostic = diagnostic; self.path = path
+        super().__init__('응답에서 유효한 ID·번역문을 하나도 읽지 못해 자동 재요청을 중단했습니다.')
+
+    def __str__(self):
+        d = self.diagnostic
+        return ('응답에서 유효한 ID·번역문을 하나도 읽지 못해 자동 재요청을 중단했습니다.\n'
+                f"파일: {d['file']} / 대사: {d['first']}–{d['last']}\n"
+                f"종료 사유: {d['finish_reason']} / 응답 {d['response_characters']}자 / 생각 채널 {d['reasoning_characters']}자 / 완성 JSON {d['parsed_values']}개\n"
+                f"일치 ID {d['matched_ids']}개 / 정상 ID·문자열 {d['usable_rows']}개 / 중복 ID {d['duplicate_ids']}개 / 미등록 ID {d['unknown_ids']}개\n"
+                '기대 ID 예시: '+', '.join(d['expected_id_examples'])+'\n'
+                '관측 ID 유형: '+json.dumps(d['observed_id_types'],ensure_ascii=False)+'\n'
+                '서버 토큰 수: '+json.dumps(d['usage'],ensure_ascii=False)+'\n'
+                f'진단 파일: {self.path}\n'
+                '생성된 응답 미리보기 (번역 API 탭의 테스트 · 오류 내용 복사로 복사):\n'
+                +(d['response_preview'] or '(본문이 비어 있습니다)')+'\n'
+                '응답 순서나 짧은 번호로 원본 ID를 추정해 연결하지 않았습니다. 정상 저장분은 유지합니다.')
 
 
 def _wire_id(file_key, cue):
@@ -225,6 +264,30 @@ def _run(folder, run_id, config, files, cancel, progress, client):
             check(); emit('review','응답 ID·ASS 구조·문자·반복·길이를 검수합니다')
             expected = {ids[c.id] for c in group}
             found, duplicates, unknown = parse_rows(response.content,expected)
+            usable = sum(isinstance(v,str) and bool(v.strip()) for v in found.values())
+            if not usable:
+                key = getattr(client,'key','') or config.get('key','')
+                types = {}
+                items = response_items(response.content)
+                for item in items:
+                    for row in item_rows(item):
+                        if isinstance(row,dict):
+                            kind = type(row.get('id')).__name__
+                            types[kind] = types.get(kind,0)+1
+                diagnostic = dict(file=safe_preview(name,key,240),first=group[0].id+1,last=group[-1].id+1,
+                     finish_reason=safe_preview(response.finish_reason,key,80) or '(없음/중단)',
+                     response_characters=len(response.content),reasoning_characters=response.reasoning_characters,parsed_values=len(items),matched_ids=len(found),
+                     usable_rows=usable,duplicate_ids=len(duplicates),unknown_ids=len(unknown),observed_id_types=types,
+                     expected_id_examples=[ids[c.id] for c in group[:3]],
+                     usage={k:v for k,v in response.usage.items() if k in ('prompt_tokens','completion_tokens','total_tokens') and type(v) is int},
+                     max_tokens=output_limit,requests=requests,
+                     response_preview=safe_preview(response.content,key,2400))
+                errors.update((name,c.id) for c in group)
+                checkpoint()
+                path = folder/'diagnostics'/'last-response.json'
+                atomic_json(path,diagnostic)
+                emit('review',f'응답 전체 ID/형식 인식 실패: {len(group)}대사 · 자동 재요청 중단 · 번역 API 탭에서 응답 미리보기를 확인하세요')
+                raise ResponseFormatError(diagnostic,path)
             if unknown: emit('review',f'요청에 없는 ID {len(unknown)}개를 제외했습니다')
             repeated = {}
             for key,value in found.items():

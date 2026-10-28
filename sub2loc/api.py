@@ -139,7 +139,9 @@ class Client:
             content = delta.get('content')
             if content is not None and not isinstance(content, str):
                 raise ApiError('번역 응답 content가 문자열이 아닙니다.', retryable=False)
-            result.content += content or ''  # reasoning_content is deliberately excluded.
+            result.content += content or ''  # reasoning_content is never exposed as translation.
+            reasoning = delta.get('reasoning_content')
+            if isinstance(reasoning,str): result.reasoning_characters += len(reasoning)
             if choice.get('finish_reason'): result.finish_reason = choice['finish_reason']
             result.seconds = max(0.000001, time.monotonic() - started)
             on_event(characters=len(result.content), usage=result.usage, timings=result.timings, seconds=result.seconds)
@@ -223,6 +225,7 @@ class ChatResult:
     timings: dict = field(default_factory=dict)
     seconds: float = 0.0
     interrupted: bool = False
+    reasoning_characters: int = 0
 
 
 class StreamInterrupted(ApiError):
