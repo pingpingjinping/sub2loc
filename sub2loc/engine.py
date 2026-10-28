@@ -82,7 +82,7 @@ class Engine:
         identity = {k: v for k, v in config.items() if k != 'key'}
         run_id = digest({'version': PROMPT_VERSION, 'config': identity,
                          'files': [(n, hashlib.sha256(b).hexdigest()) for n, b in files]})
-        project_id = digest(config['work'])[:24]
+        project_id = digest(config.get('work_id') or config['work'])[:24]
         folder = self.root / project_id
         project_path = folder / 'project.json'
         run_path = folder / 'runs' / (run_id + '.json')
