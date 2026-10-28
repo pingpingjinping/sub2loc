@@ -129,7 +129,8 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
     def split_reason(exc, count):
         reason = '출력 한도' if isinstance(exc, OutputLimitError) else (
                  '컨텍스트 예산' if isinstance(exc, PromptError) else '줄·태그 대응')
-        progress(phase='retry', message=f'{reason} 확인 · {count}개 묶음을 더 작게 나눕니다')
+        detail = str(exc).splitlines()[0]
+        progress(phase='retry', message=f'{reason}: {detail} · {count}개 묶음을 더 작게 나눕니다')
 
     def translate_pieces(pieces, history, cue_id):
         if not pieces:
@@ -159,7 +160,8 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
             for plan, piece in zip(group, native):
                 masked, controls = protect(values[id(piece)])
                 if controls != plan.cue.protected:
-                    raise AlignmentError('번역문에서 원본 ASS 태그·줄바꿈의 개수·순서·내용이 달라졌습니다.')
+                    raise AlignmentError(f'대사 {plan.cue.id + 1}: ASS 태그·줄바꿈 불일치 '
+                                         f'(원문 {len(plan.cue.protected)}개 / 응답 {len(controls)}개). 개수·순서·내용을 확인합니다.')
                 plan.cue.restore(masked)
                 translated[str(plan.cue.id)] = masked
         except (OutputLimitError, ValueError) as exc:
@@ -173,7 +175,7 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
             if not pieces or (not isinstance(exc, PromptError) and len(pieces) == 1
                               and group[0].cue.restore(group[0].cue.text).strip() == pieces[0].source):
                 raise
-            progress(phase='retry', message='문장 단위 태그 검증·예산 확인 실패 · 보호 구간별 번역으로 전환합니다')
+            progress(phase='retry', message=str(exc).splitlines()[0] + ' · 보호 구간별 번역으로 전환합니다')
             values = translate_pieces(pieces, history, group[0].cue.id + 1)
             translated = {str(group[0].cue.id): group[0].render(values)}
         context = ''

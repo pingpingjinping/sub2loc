@@ -17,11 +17,12 @@ from PySide6.QtWidgets import (
     QSplitter, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from . import __version__
-from .api import Client
+from .api import Client, safe_preview
 from .catalog import Catalog
 from .connection import test_translation
 from .jako import mode_for
 from .engine import Cancelled
+from .timing import RunClock, format_duration
 from .workspace import Workspace, Work, default_data_dir, translate_queue, validate_settings
 
 STYLE = '''
@@ -273,6 +274,9 @@ class MainWindow(QMainWindow):
         self.wait_message = ''
         self.wait_timer = QTimer(self); self.wait_timer.setInterval(1000)
         self.wait_timer.timeout.connect(self.show_wait_time)
+        self.run_clock = RunClock()
+        self.elapsed_timer = QTimer(self); self.elapsed_timer.setInterval(1000)
+        self.elapsed_timer.timeout.connect(self.show_elapsed_time)
         self.rows = {}
         self.setWindowTitle('sub2loc · 자막 번역 워크스페이스')
         self.resize(1240, 870)
@@ -401,8 +405,17 @@ class MainWindow(QMainWindow):
         layout.addLayout(output_row)
         self.progress_bar = QProgressBar(); self.progress_bar.setRange(0, 10000); self.progress_bar.setValue(0); self.progress_bar.setTextVisible(False)
         layout.addWidget(self.progress_bar)
+        self.run_log = QPlainTextEdit(); self.run_log.setReadOnly(True)
+        self.run_log.document().setMaximumBlockCount(300)
+        self.run_log.setMaximumHeight(130); self.run_log.setVisible(False)
+        self.run_log.setPlaceholderText('요청한 대사 범위, 자동 분할 이유, 검증·저장 내역이 여기에 표시됩니다.')
+        layout.addWidget(self.run_log)
         footer = QHBoxLayout()
         self.status = label('자막을 추가해 시작하세요.', 'muted'); footer.addWidget(self.status, 1)
+        self.log_button = QPushButton('처리 내역'); self.log_button.setCheckable(True)
+        self.log_button.toggled.connect(self.run_log.setVisible); footer.addWidget(self.log_button)
+        self.elapsed_label = label('', 'muted'); self.elapsed_label.setVisible(False)
+        footer.addWidget(self.elapsed_label)
         self.stop_button = button('중단', self.stop); self.stop_button.setEnabled(False)
         self.start_button = button('전체 번역 시작', self.start, True)
         footer.addWidget(self.stop_button); footer.addWidget(self.start_button)
@@ -685,6 +698,9 @@ class MainWindow(QMainWindow):
         self.worker = TranslationTask(self.workspace, config, self.data_dir, output, self)
         self.worker.progress.connect(self.job_progress); self.worker.completed.connect(self.job_complete)
         self.worker.error.connect(self.job_error); self.worker.finished.connect(self.job_finished)
+        self.run_clock.start(); self.elapsed_label.setVisible(True)
+        self.run_log.clear(); self.log_run_event('전체 번역 시작 · 파일을 확인합니다.')
+        self.show_elapsed_time(); self.elapsed_timer.start()
         self.set_busy(True); self.status.setText('자막 파일을 확인하고 있습니다…'); self.worker.start()
 
     def job_progress(self, data):
@@ -695,6 +711,7 @@ class MainWindow(QMainWindow):
         if 'message' in data:
             self.wait_message = f"{data.get('work', '')} · {data['message']}"
             self.status.setText(self.wait_message)
+            self.log_run_event(self.wait_message)
         if data.get('phase') in ('request', 'retry'):
             self.request_started = time.monotonic(); self.wait_timer.start()
             self.show_wait_time()
@@ -709,22 +726,40 @@ class MainWindow(QMainWindow):
             elapsed = int(time.monotonic() - self.request_started)
             self.status.setText(self.wait_message + f' · 응답 대기 {elapsed}초')
 
+    def show_elapsed_time(self):
+        self.elapsed_label.setText('전체 경과 ' + format_duration(self.run_clock.elapsed()))
+
+    def log_run_event(self, message):
+        message = safe_preview(message, self.key.text(), 400).replace('\n', ' ')
+        self.run_log.appendPlainText('[' + format_duration(self.run_clock.elapsed()) + '] ' + message)
+
+    def finish_run_time(self):
+        self.elapsed_timer.stop()
+        duration = format_duration(self.run_clock.finish())
+        self.elapsed_label.setText('총 소요 ' + duration)
+        return duration
+
     def job_complete(self, paths):
         self.wait_timer.stop(); self.request_started = None
+        duration = self.finish_run_time()
         self.results = paths; self.progress_bar.setValue(self.progress_bar.maximum())
-        self.status.setText(f'완료! {len(paths)}개 자막을 저장했습니다. 결과 열기에서 확인하세요.')
+        self.status.setText(f'완료! 자막 {len(paths)}개 · 총 {duration}. 결과 열기에서 확인하세요.')
+        self.log_run_event(self.status.text())
 
     def job_error(self, message):
         self.wait_timer.stop(); self.request_started = None
+        duration = self.finish_run_time()
         for entry in self.workspace.entries:
             if entry.status == '번역 중': entry.status = '중단' if self.worker.cancel.is_set() else '오류'
             elif entry.status == '대기': entry.status = '준비'
         self.probe_result.setPlainText(message)
         self.settings_tabs.setCurrentIndex(1)
-        self.status.setText(message.splitlines()[0] + ' · 번역 API 탭에서 상세 확인')
+        self.status.setText(message.splitlines()[0] + f' · 경과 {duration} · 번역 API 탭에서 상세 확인')
+        self.log_run_event(self.status.text())
 
     def job_finished(self):
         self.wait_timer.stop(); self.request_started = None
+        self.finish_run_time()
         self.worker.deleteLater(); self.worker = None
         self.set_busy(False); self.refresh(); self.save()
         if self.pending_close and not self.background_tasks: self.close()
@@ -734,6 +769,7 @@ class MainWindow(QMainWindow):
         if self.worker is not None:
             self.worker.cancel.set(); self.stop_button.setEnabled(False)
             self.status.setText('중단 요청을 보냈습니다. 진행 중인 API 응답과 저장을 기다립니다…')
+            self.log_run_event(self.status.text())
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() and self.worker is None: event.acceptProposedAction()
