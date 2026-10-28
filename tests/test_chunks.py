@@ -130,7 +130,7 @@ class ChunkTests(unittest.TestCase):
             self.assertEqual(output[0][1], raw)
             self.assertEqual(client.sources, ['第一\n第二'] * 2)
 
-    def test_context_setting_validation_and_old_incomplete_checkpoint_migration(self):
+    def test_context_setting_validation_and_old_fragment_cache_is_not_reused(self):
         self.assertEqual(validate_settings(config())['context_tokens'], 4096)
         for value in (True, 512, 131073, '4096'):
             with self.assertRaises(ValueError): validate_settings(dict(config(), context_tokens=value))
@@ -152,7 +152,7 @@ class ChunkTests(unittest.TestCase):
             client = Translator()
             Engine(Path(folder)).translate(cfg, [('old.ass', SAMPLE)], client=client)
             self.assertEqual(len(client.prompts), 1)
-            self.assertNotIn('おはよう、ミサキ。', client.prompts[0].split('<start_of_turn>user\n')[1])
+            self.assertIn('おはよう、ミサキ。', client.prompts[0].split('<start_of_turn>user\n')[1])
             self.assertEqual(json.loads(old_path.read_text())['offset'], 1)
 
 

@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from sub2loc.api import Client, OutputLimitError
 from sub2loc.engine import Engine
-from test_jako import SAMPLE, TRANSLATIONS, Translator, config
+from test_jako import SAMPLE, TRANSLATIONS, Translator, config, translate_sample
 
 
 class OutputLimitTests(unittest.TestCase):
@@ -32,15 +32,15 @@ class OutputLimitTests(unittest.TestCase):
             def complete_text(self, prompt, limit):
                 self.prompts.append(prompt)
                 source = prompt.split('<start_of_turn>user\n')[1].split('<end_of_turn>')[0]
-                if source.startswith('アキラ'):
+                if 'アキラ' in source:
                     raise OutputLimitError(limit, '번역 반복 ' * 300,
                                            {'prompt_tokens': 200, 'completion_tokens': limit})
-                return '\n'.join(TRANSLATIONS[row] for row in source.splitlines())
+                return translate_sample(source)
         with tempfile.TemporaryDirectory() as folder:
             engine = Engine(Path(folder)); limited = Limited(); cfg = config(); cfg['batch_size'] = 1
             with self.assertRaises(OutputLimitError) as caught:
                 engine.translate(cfg, [('episode.ass', SAMPLE)], client=limited)
-            self.assertEqual(len(limited.prompts), 3)  # A smaller changed request after the two-span failure.
+            self.assertEqual(len(limited.prompts), 4)  # A smaller changed request after the two-span failure.
             self.assertEqual(caught.exception.filename, 'episode.ass')
             self.assertEqual(caught.exception.first, 2)
             self.assertIn('アキラ', str(caught.exception))
@@ -119,7 +119,7 @@ class OutputLimitUiTests(unittest.TestCase):
                 while window.worker is not None:
                     if time.monotonic() > deadline: self.fail('Error UI timed out')
                     QTest.qWait(10)
-                self.assertEqual(len(requests), 1)
+                self.assertEqual(len(requests), 2)
                 details = window.probe_result.toPlainText()
                 self.assertIn('my-episode.ass', details)
                 self.assertIn('おはよう、ミサキ。', details)

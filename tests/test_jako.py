@@ -24,6 +24,11 @@ def config():
                 encoding='utf-8-sig', batch_size=12, max_tokens=4096, timeout=5, api_mode='auto')
 
 
+def translate_sample(source):
+    for before, after in TRANSLATIONS.items(): source = source.replace(before, after)
+    return source
+
+
 class Translator:
     def __init__(self, cancel=None): self.prompts = []; self.cancel = cancel
     def complete(self, messages): raise AssertionError('Translation model must not receive chat/JSON requests')
@@ -31,7 +36,7 @@ class Translator:
         self.prompts.append(prompt)
         self_test_source = prompt.split('<start_of_turn>user\n')[1].split('<end_of_turn>')[0]
         if self.cancel: self.cancel.set()
-        return '\n'.join(TRANSLATIONS[row] for row in self_test_source.splitlines())
+        return translate_sample(self_test_source)
 
 
 class TranslationModeTests(unittest.TestCase):
@@ -64,7 +69,7 @@ class TranslationModeTests(unittest.TestCase):
             for prompt in translator.prompts:
                 source = prompt.split('<start_of_turn>user\n')[1].split('<end_of_turn>')[0]
                 self.assertNotIn('⟪S2L:', source); self.assertNotIn('translations', source)
-                self.assertNotIn('\\N', source); self.assertNotIn('{', source)
+                self.assertIn('{', source); self.assertIn(r'\N', source)
             result = output[0][1].decode()
             self.assertIn(r'{\i1}좋은 아침, 미사키.{\i0}', result)
             self.assertIn(r'아키라 군, 좋은 아침.\N오늘은 일찍 왔네.', result)
@@ -90,7 +95,7 @@ class TranslationModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             translator = Broken()
             with self.assertRaises(ValueError): Engine(Path(folder)).translate(config(), [('01.ass', SAMPLE)], client=translator)
-            self.assertEqual(len(translator.prompts), 2)
+            self.assertEqual(len(translator.prompts), 3)
             self.assertFalse(list(Path(folder).rglob('*.json')))
 
 

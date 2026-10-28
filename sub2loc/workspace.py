@@ -166,6 +166,8 @@ def validate_settings(settings):
     config.setdefault('context_tokens', 4096)
     if type(config['context_tokens']) is not int or not 1024 <= config['context_tokens'] <= 131072:
         raise ValueError('컨텍스트 크기는 1024–131072 범위로 입력하세요.')
+    if type(config.get('hide_readings', False)) is not bool:
+        raise ValueError('독음 숨기기 설정이 올바르지 않습니다.')
     mode_for(config)
     return config
 

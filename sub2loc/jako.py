@@ -28,7 +28,7 @@ def mode_for(config):
     return mode
 
 
-def prompt_for(source, notes, pairs, max_tokens, context_tokens=4096, *, multiline=False):
+def prompt_for(source, notes, pairs, max_tokens, context_tokens=4096, *, multiline=False, preserve_controls=False):
     """Never truncate source. Limit hints within the configured context.
 
 UTF-8 bytes provide a conservative token-count bound for the byte-fallback
@@ -36,6 +36,8 @@ vocabulary. Leave space for output and framing; no tokenizer dependency needed.
 """
     max_tokens = min(max_tokens, context_tokens // 2)
     instruction = INSTRUCTION + (' 원문 한 줄마다 한 줄로 번역하고 줄 수와 순서를 유지하세요.' if multiline else '')
+    if preserve_controls:
+        instruction += ' ASS 태그와 줄바꿈 코드를 원문 그대로 유지하세요.'
     prefix = '<start_of_turn>system\n' + instruction
     suffix = '<end_of_turn>\n<start_of_turn>user\n' + source + '<end_of_turn>\n<start_of_turn>model\n'
     marker = ' 번역 지침: '

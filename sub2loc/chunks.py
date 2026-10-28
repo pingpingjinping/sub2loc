@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import re
 import threading
 from .api import ApiError, OutputLimitError, safe_preview
-from .ass import TOKEN
+from .ass import TOKEN, protect
 from .jako import PromptError, prompt_for, remember
 
 
@@ -35,7 +35,7 @@ class CuePlan:
 
 
 def source_budget(notes, pairs, max_tokens, context_tokens):
-    base, limit = prompt_for('', '', [], max_tokens, context_tokens, multiline=True)
+    base, limit = prompt_for('', '', [], max_tokens, context_tokens, multiline=True, preserve_controls=True)
     # Reserve some context for names and recent translations before packing input.
     hints = len(notes.encode('utf-8')) + sum(len(str(p).encode('utf-8')) for p in pairs[-6:])
     reserve = min(hints, 768, context_tokens // 6)
@@ -79,8 +79,7 @@ def choose_end(cues, start, batch_size, notes, pairs, max_tokens, context_tokens
     budget = source_budget(notes, pairs, max_tokens, context_tokens)
     used, end = 0, start
     while end < len(cues) and end - start < batch_size:
-        plan = make_plan(cues[end], budget)
-        cost = sum(len(p.source.encode('utf-8')) + 1 for p in plan.pieces)
+        cost = len(cues[end].restore(cues[end].text).encode('utf-8')) + 1
         if end > start and used + cost > budget:
             break
         used += cost; end += 1
@@ -95,10 +94,10 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
     budget = source_budget(notes, pairs, max_tokens, context_tokens)
     plans = [make_plan(cue, budget) for cue in cues]
 
-    def request(pieces, history, first, last):
+    def request(pieces, history, first, last, *, preserve_controls=False):
         source = '\n'.join(p.source for p in pieces)
         prompt, limit = prompt_for(source, notes, history, max_tokens, context_tokens,
-                                   multiline=len(pieces) > 1)
+                                   multiline=len(pieces) > 1, preserve_controls=preserve_controls)
         for attempt in range(3):
             check_cancel()
             progress(phase='request', first=first, last=last,
@@ -123,7 +122,7 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
                 '\n생성된 출력 미리보기:\n' + safe_preview(raw, getattr(client, 'key', '')))
         # A model may not inject a new protected token or ASS control into a span.
         for row in rows:
-            if TOKEN.search(row) or re.search(r'[{}\r\n]|\\[Nnh]', row):
+            if not preserve_controls and (TOKEN.search(row) or re.search(r'[{}\r\n]|\\[Nnh]', row)):
                 raise AlignmentError(f'대사 {first}–{last}: 번역문에 새 ASS 제어문자가 포함되었습니다.')
         return {id(piece): row.strip() for piece, row in zip(pieces, rows)}
 
@@ -150,8 +149,19 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
         check_cancel()
         pieces = [piece for plan in group for piece in plan.pieces]
         try:
-            values = request(pieces, history, group[0].cue.id + 1, group[-1].cue.id + 1) if pieces else {}
-            translated = {str(plan.cue.id): plan.render(values) for plan in group}
+            # Keep the complete cue in one model input, including its original
+            # controls: typography must not turn words or counters into isolated
+            # fragments. Accept only the exact original control sequence.
+            native = [Piece(plan.cue.restore(plan.cue.text)) for plan in group]
+            values = request(native, history, group[0].cue.id + 1, group[-1].cue.id + 1,
+                             preserve_controls=True) if pieces else {id(p): p.source for p in native}
+            translated = {}
+            for plan, piece in zip(group, native):
+                masked, controls = protect(values[id(piece)])
+                if controls != plan.cue.protected:
+                    raise AlignmentError('번역문에서 원본 ASS 태그·줄바꿈의 개수·순서·내용이 달라졌습니다.')
+                plan.cue.restore(masked)
+                translated[str(plan.cue.id)] = masked
         except (OutputLimitError, ValueError) as exc:
             if len(group) > 1:
                 split_reason(exc, len(group))
@@ -160,12 +170,11 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
                 return run(group[mid:], history)
             # Keep the complete cue atomic even when its style-separated parts
             # need smaller requests. A one-piece failure is not retried unchanged.
-            if len(pieces) <= 1:
+            if not pieces or (not isinstance(exc, PromptError) and len(pieces) == 1
+                              and group[0].cue.restore(group[0].cue.text).strip() == pieces[0].source):
                 raise
-            split_reason(exc, len(pieces))
-            mid = len(pieces) // 2
-            values = translate_pieces(pieces[:mid], history, group[0].cue.id + 1)
-            values.update(translate_pieces(pieces[mid:], history, group[0].cue.id + 1))
+            progress(phase='retry', message='문장 단위 태그 검증·예산 확인 실패 · 보호 구간별 번역으로 전환합니다')
+            values = translate_pieces(pieces, history, group[0].cue.id + 1)
             translated = {str(group[0].cue.id): group[0].render(values)}
         context = ''
         for plan in group:

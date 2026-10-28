@@ -84,36 +84,31 @@ class Engine:
         mode = mode_for(config)
         identity = {k: v for k, v in config.items() if k not in ('key', 'api_mode')}
         if mode == 'ja-ko-vn':
-            identity['request_mode'] = 'ja-ko-vn-v2'
+            identity['request_mode'] = 'ja-ko-vn-v3'
             identity.setdefault('context_tokens', 4096)
         else:
             identity.pop('context_tokens', None)
+            if not identity.get('hide_readings'): identity.pop('hide_readings', None)
         run_id = digest({'version': PROMPT_VERSION, 'config': identity,
                          'files': [(n, hashlib.sha256(b).hexdigest()) for n, b in files]})
         project_key = config.get('work_id') or config['work']
         if mode == 'ja-ko-vn':
-            project_key = {'work': project_key, 'mode': mode}
+            project_key = {'work': project_key, 'mode': 'ja-ko-vn-v3'}
         project_id = digest(project_key)[:24]
         folder = self.root / project_id
         project_path = folder / 'project.json'
         run_path = folder / 'runs' / (run_id + '.json')
-        if mode == 'ja-ko-vn' and not run_path.exists() and identity['context_tokens'] == 4096:
-            legacy_identity = dict(identity, request_mode='ja-ko-vn-v1')
-            legacy_identity.pop('context_tokens')
-            legacy_id = digest({'version': PROMPT_VERSION, 'config': legacy_identity,
-                                'files': [(n, hashlib.sha256(b).hexdigest()) for n, b in files]})
-            legacy_path = folder / 'runs' / (legacy_id + '.json')
-            if legacy_path.exists():
-                legacy = json.loads(legacy_path.read_text('utf-8'))
-                if not legacy.get('complete'):
-                    atomic_json(run_path, legacy)
         project = json.loads(project_path.read_text('utf-8')) if project_path.exists() else {'work': config['work'], 'context': ''}
         state = json.loads(run_path.read_text('utf-8')) if run_path.exists() else {
             'context': project['context'], 'file': 0, 'offset': 0, 'translations': {}, 'outputs': [],
             'recent_pairs': project.get('recent_pairs', [])}
         outputs = [(item['name'], bytes.fromhex(item['hex'])) for item in state['outputs']]
         # Validate every file before making the first API request.
-        documents = [AssDocument(raw, config['encoding']) for _, raw in files]
+        documents = [AssDocument(raw, config['encoding'], hide_readings=config.get('hide_readings', False)) for _, raw in files]
+        for (name, _), doc in zip(files, documents):
+            if doc.reading_count:
+                action = '숨김' if config.get('hide_readings', False) else '유지'
+                progress(file=name, phase='preflight', message=f'{name}: 독음(루비) 추정 {doc.reading_count}개 · {action}')
         total = sum(len(d.cues) for d in documents)
         for file_index in range(state['file'], len(files)):
             name, _ = files[file_index]

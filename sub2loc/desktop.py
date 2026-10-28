@@ -10,7 +10,7 @@ import time
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QApplication, QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
+    QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox,
@@ -378,6 +378,9 @@ class MainWindow(QMainWindow):
         api_layout.addWidget(self.api_hint)
         advanced_button = QPushButton('상세 번역 설정 펼치기'); advanced_button.setCheckable(True)
         advanced = QWidget(); advanced_form = QFormLayout(advanced)
+        self.hide_readings = QCheckBox('독음(루비) 추정 행을 숨기기')
+        self.hide_readings.setToolTip('같은 시간의 본문 위에 작게 배치된 일본어 읽기 표시를 추정합니다. 켜면 해당 행은 번역하지 않고 Comment로 보관합니다. 잘못 검출될 수 있어 기본은 꺼져 있습니다.')
+        advanced_form.addRow(self.hide_readings)
         for text, widget in [('원문 언어', self.source), ('번역 언어', self.target), ('원본 인코딩', self.encoding),
                              ('묶음 최대 대사', self.batch), ('컨텍스트 토큰', self.context_tokens), ('최대 출력 토큰', self.tokens), ('응답 제한 시간', self.timeout)]:
             advanced_form.addRow(text, widget)
@@ -413,6 +416,7 @@ class MainWindow(QMainWindow):
 
     def load_settings(self):
         s = self.workspace.settings
+        self.hide_readings.setChecked(s.get('hide_readings') is True)
         for key, widget in [('url', self.url), ('source', self.source), ('target', self.target), ('output', self.output)]:
             if key in s: widget.setText(str(s[key]))
         self.model.setCurrentText(s.get('model', ''))
@@ -425,7 +429,7 @@ class MainWindow(QMainWindow):
 
     def settings(self):
         return dict(url=self.url.text().strip(), model=self.model.currentText().strip(), key=self.key.text(),
-                    api_mode=self.api_mode.currentData(), context_tokens=self.context_tokens.value(),
+                    api_mode=self.api_mode.currentData(), context_tokens=self.context_tokens.value(), hide_readings=self.hide_readings.isChecked(),
                     source=self.source.text().strip() or 'auto', target=self.target.text().strip(),
                     encoding=self.encoding.currentData(), batch_size=self.batch.value(),
                     max_tokens=self.tokens.value(), timeout=self.timeout.value())
@@ -591,8 +595,8 @@ class MainWindow(QMainWindow):
             special = mode_for(self.settings()) == 'ja-ko-vn'
             self.batch.setEnabled(True)
             self.api_hint.setText(
-                'ja-ko-vn 전용: 컨텍스트 안에 들어가는 연속 대사를 묶어 번역합니다. '
-                '입력·메모·이전 대사·출력 공간을 함께 계산하고, 잘리거나 줄 대응이 다르면 더 작게 나눕니다. '
+                'ja-ko-vn 전용: 태그를 포함한 대사 전체를 먼저 번역하고 원본 태그를 검증합니다. '
+                '검증 실패 시 더 작은 묶음, 필요하면 구간별 번역으로 전환합니다. '
                 '컨텍스트는 Bionic의 실제 로드 설정과 맞추세요. 출력 예약은 설정값과 컨텍스트 절반 중 작은 값입니다.' if special else
                 '범용 대화형: 대사 묶음과 JSON 응답을 사용합니다. 자막과 작품 메모는 설정한 API 서버로 전송됩니다.')
         except ValueError as exc:

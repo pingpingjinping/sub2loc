@@ -1,5 +1,5 @@
 """Lossless ASS dialogue parsing; only Text fields are replaced."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 
 TOKEN = re.compile(r'⟪S2L:\d+⟫')
@@ -55,8 +55,32 @@ def protect(text: str) -> tuple[str, list[str]]:
     return ''.join(parts), protected
 
 
+def reading_candidates(cues):
+    """Conservative layout heuristic, never used without an explicit setting."""
+    groups = {}
+    for cue in cues:
+        fields = cue.prefix.split(',')
+        if len(fields) >= 4:
+            groups.setdefault((tuple(fields[1:3]), cue.style), []).append(cue)
+    found = set()
+    for group in groups.values():
+        for cue in group:
+            visible = TOKEN.sub('', cue.text).strip()
+            controls = ''.join(cue.protected)
+            pos = re.search(r'\\pos\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)', controls)
+            if not (re.fullmatch(r'[ぁ-ゖァ-ヺー]{1,24}', visible) and pos
+                    and re.search(r'\\fscx50(?![\d.])', controls) and re.search(r'\\fscy50(?![\d.])', controls)):
+                continue
+            for other in group:
+                if other is cue or not re.search(r'[一-鿿０-９0-9]', TOKEN.sub('', other.text)): continue
+                base = re.search(r'\\pos\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)', ''.join(other.protected))
+                if base and float(base[1]) <= float(pos[1]) and 10 <= float(base[2]) - float(pos[2]) <= 100:
+                    found.add(cue.id); break
+    return found
+
+
 class AssDocument:
-    def __init__(self, raw: bytes, encoding='utf-8-sig'):
+    def __init__(self, raw: bytes, encoding='utf-8-sig', *, hide_readings=False):
         self.encoding = encoding
         self.bom = raw.startswith(b'\xef\xbb\xbf')
         self.output_bom = b''
@@ -99,6 +123,13 @@ class AssDocument:
                                  ending, get('name'), get('style'), masked, saved))
         if section == '' or not any(x.strip().lower() == '[events]' for x in self.lines):
             raise ValueError('ASS Events 섹션을 찾을 수 없습니다.')
+        readings = reading_candidates(self.cues)
+        self.reading_count = len(readings)
+        if hide_readings:
+            for cue in self.cues:
+                if cue.id in readings:
+                    self.lines[cue.line] = 'Comment:' + self.lines[cue.line].split(':', 1)[1]
+            self.cues = [replace(cue, id=i) for i, cue in enumerate(c for c in self.cues if c.id not in readings)]
 
     def render(self, translations: dict[str, str]) -> bytes:
         if set(translations) != {str(c.id) for c in self.cues}:
