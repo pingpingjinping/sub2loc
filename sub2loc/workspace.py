@@ -89,8 +89,8 @@ class Workspace:
             path = Path(value)
             if path.is_dir():
                 for folder, _, names in os.walk(path, followlinks=False, onerror=lambda e: errors.append(str(e))):
-                    found.extend(Path(folder) / n for n in names if n.lower().endswith('.ass'))
-            elif path.is_file() and path.suffix.lower() == '.ass':
+                    found.extend(Path(folder) / n for n in names if n.lower().endswith(('.ass', '_source.txt')))
+            elif path.is_file() and path.suffix.lower() in ('.ass','.txt'):
                 found.append(path)
             else:
                 errors.append(f'ASS 파일 또는 폴더가 아닙니다: {path}')
@@ -98,7 +98,7 @@ class Workspace:
         count = 0
         for path in sorted(found, key=natural_key):
             # Never import our own generated outputs recursively.
-            if path.name.lower().endswith('.translated.ass'):
+            if path.name.lower().endswith(('.translated.ass','.translated.txt')):
                 continue
             resolved = str(path.resolve())
             if os.path.normcase(resolved) not in existing:
@@ -211,7 +211,7 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             if not path.is_file() or not 0 < path.stat().st_size <= 4 * 1024 * 1024:
                 raise ValueError(f'파일이 없거나 크기가 4MB를 넘습니다: {path.name}')
             raw = path.read_bytes()
-            document_for(raw, settings)
+            document_for(raw, settings, path.name)
             name = path.stem
             names[name.casefold()] = names.get(name.casefold(), 0) + 1
             files.append((path, raw))
@@ -220,10 +220,10 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             stem = path.stem[:160]
             if names[path.stem.casefold()] > 1:
                 stem += '-' + digest(str(path))[:8]
-            targets.append(folder / (stem + '.translated.' + output_format(settings)))
+            targets.append(folder / (stem + '.translated.' + ('txt' if path.suffix.lower()=='.txt' else output_format(settings))))
         plans.append((work, entries, files, targets))
     engine, results = Engine(Path(root) / 'translations'), []
-    queue_total = sum(len(document_for(raw,settings).cues) for _,_,source,_ in plans for _,raw in source)
+    queue_total = sum(len(document_for(raw,settings,str(path)).cues) for _,_,source,_ in plans for path,raw in source)
     prior_done = 0; prior_metrics = dict(requests=0,retries=0,errors=0)
     queue_eta = ThroughputETA()
     for work_index, (work, entries, source, targets) in enumerate(plans):
@@ -271,7 +271,7 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             if file_review:
                 atomic_json(saved.with_suffix('.review.json'), {'file': saved.name, 'mechanical_checks_only': True, 'items': file_review})
             progress(index=index, status='완료', output=str(saved), work=work.title)
-        prior_done += sum(len(document_for(raw,settings).cues) for _,raw in source)
+        prior_done += sum(len(document_for(raw,settings,str(path)).cues) for path,raw in source)
         for key in prior_metrics: prior_metrics[key] += work_metrics[key]
         # The engine's project file remains the canonical continuity checkpoint.
         atomic_json(targets[0].parent / 'context.json', {'work': work.title, 'id': work.id, 'context': context})

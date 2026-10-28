@@ -19,6 +19,7 @@ def output_format(config):
 
 
 def output_name(name, config):
+    if config.get('input_format')=='balloon':return Path(name).stem+'.translated.txt'
     return Path(name).stem + '.translated.' + output_format(config)
 
 
@@ -123,7 +124,10 @@ class PlainDocument:
         return result.encode(self.output_encoding)
 
 
-def document_for(raw, config):
+def document_for(raw, config, name=''):
+    if config.get('input_format')=='balloon' or Path(name).suffix.lower()=='.txt':
+        from .balloon import BalloonDocument
+        return BalloonDocument(raw)
     if type(config.get('strip_ass_decoration', False)) is not bool:
         raise ValueError('ASS 색상·강조 제거 설정이 올바르지 않습니다.')
     if output_format(config) != 'ass':

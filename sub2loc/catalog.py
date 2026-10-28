@@ -14,12 +14,12 @@ SEARCH = '''query ($search: String!) {
   }
 }'''
 CHARACTERS = '''query ($id: Int!) {
-  Media(id: $id, type: ANIME) {
+  Media(id: $id) {
     characters(perPage: 25, sort: ROLE) { nodes { name { full native } } }
   }
 }'''
 PROFILE = '''query ($id: Int!) {
-  Media(id: $id, type: ANIME) {
+  Media(id: $id) {
     id title { native romaji english } seasonYear format episodes genres
     description(asHtml: false)
     characters(perPage: 25, sort: [ROLE, RELEVANCE, ID]) {
@@ -109,10 +109,11 @@ class Catalog:
         except (error.URLError, TimeoutError, OSError, ValueError) as exc:
             raise CatalogError('작품 검색에 연결하지 못했습니다. 직접 작품을 등록할 수도 있어요.') from exc
 
-    def search(self, text):
+    def search(self, text, media_type="ANIME"):
+        if media_type not in ("ANIME","MANGA"):raise ValueError("작품 유형을 확인하세요.")
         if not text.strip() or len(text) > 200:
             raise ValueError('검색어를 1–200자로 입력하세요.')
-        data = self.query(SEARCH, {'search': text.strip()})
+        data = self.query(SEARCH.replace('type: ANIME','type: '+media_type), {'search': text.strip()})
         works = []
         for row in data['Page']['media']:
             title = row.get('title') or {}

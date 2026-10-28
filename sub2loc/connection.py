@@ -11,8 +11,10 @@ SOURCE = '今日はいい天気ですね。'
 
 def test_translation(settings):
     config = validate_settings(settings)
-    config = dict(config, work='API 연결 테스트', notes='', timeout=min(config['timeout'], 60))
-    raw = ('[Events]\nFormat: Text\nDialogue:' + SOURCE + '\n').encode('utf-8')
+    # This probes the chosen translation adapter, not the export renderer. Keep
+    # the user's persisted export setting untouched and parse one known format.
+    config = dict(config, work='API 연결 테스트', notes='', timeout=min(config['timeout'], 60), output_format='ass')
+    raw = ('[Events]\nFormat: Start, End, Text\nDialogue: 0:00:00.00,0:00:03.00,' + SOURCE + '\n').encode('utf-8')
     # A probe must not read or modify continuity, uploads, or real work history.
     config['encoding'] = 'utf-8-sig'
     with tempfile.TemporaryDirectory(prefix='sub2loc-probe-') as folder:

@@ -79,6 +79,11 @@ class Engine:
             self.lock.release()
 
     def _translate(self, config, files, cancel, progress, client):
+        txt=[Path(n).suffix.lower()=='.txt' for n,_ in files]
+        if any(txt):
+            if not all(txt):raise ValueError('ASS와 벌룬 TXT는 목록을 나눠 실행하세요.')
+            if mode_for(config)!='identified':raise ValueError('벌룬 TXT는 ID 기반 자막 번역 모드를 선택하세요.')
+            config=dict(config,input_format='balloon')
         client = client or Client(config['url'], config['model'], config.get('key', ''),
                                   config['timeout'], config['max_tokens'], temperature=config.get('temperature'))
         mode = mode_for(config)

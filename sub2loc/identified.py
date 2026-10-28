@@ -12,7 +12,7 @@ from .subtitles import document_for, output_format, output_name
 from .framing import frame_for
 from .response_rows import response_items
 from .engine import atomic_json, digest, Cancelled
-from .profiles import template_for
+from .profiles import template_for, DEFAULT_TEMPLATE
 from .review import inspect_translation, normalize_interjection, structure_issues
 from .timing import ThroughputETA
 
@@ -116,12 +116,13 @@ def translate(root, config, files, cancel, progress, client):
     identity = {k: v for k, v in config.items() if k not in ('key', 'api_mode')}
     # ASS's implicit/default setting must keep existing checkpoints. SRT and SMI
     # share validated plain-text translations; only the local renderer differs.
-    plain = output_format(config) != 'ass'
+    balloon = config.get('input_format')=='balloon'
+    plain = output_format(config) != 'ass' or balloon
     identity.pop('output_format', None)
     simplified = not plain and config.get('strip_ass_decoration', False)
     if not simplified: identity.pop('strip_ass_decoration', None)
     identity['prompt_template'] = template_for(config)
-    identity['pipeline'] = 'identified-plain-v1' if plain else 'identified-ass-clean-v1' if simplified else 'identified-v1'
+    identity['pipeline'] = 'identified-balloon-v1' if balloon else 'identified-plain-v1' if plain else 'identified-ass-clean-v1' if simplified else 'identified-v1'
     folder = Path(root) / digest({'work': config.get('work_id') or config['work'], 'mode': identity['pipeline']})[:24]
     run_id = digest([identity, [(n, digest(raw.hex())) for n, raw in files]])
     with project_lock(folder / 'work.lock'):
@@ -130,7 +131,7 @@ def translate(root, config, files, cancel, progress, client):
 
 def _run(folder, run_id, config, files, cancel, progress, client):
     documents = [document_for(raw, config) for _, raw in files]
-    plain = output_format(config) != 'ass'
+    plain = output_format(config) != 'ass' or config.get('input_format')=='balloon'
     total = sum(len(d.cues) for d in documents)
     run_path = folder / 'runs' / (run_id + '.json'); project_path = folder / 'project.json'
     project = json.loads(project_path.read_text('utf-8')) if project_path.exists() else {}
@@ -183,10 +184,12 @@ def _run(folder, run_id, config, files, cancel, progress, client):
         fixed = config.get('notes', '')
         payload = dict(work=config['work'], episode=current.get('file'), fixed_notes=_bound(fixed, 4000),
                        recent_translations=state['pairs'][-4:], context=context,
-                       translate=[dict(id=ids[c.id], text=frames[c.id].source, **({'speaker':c.speaker} if c.speaker else {})) for c in targets])
+                       translate=[dict(id=ids[c.id], text=frames[c.id].source, **({'speaker':c.speaker} if c.speaker else {}), **(dict(page=c.page,block=c.block) if hasattr(c,'page') else {})) for c in targets])
         if issues: payload['repair_issues'] = {ids[c.id]:issues.get(ids[c.id],[]) for c in targets}
         # Protocol is not user editable. Translation style lives in a template.
-        system = template_for(config) + '\n' + config.get('instructions', '') + '\n' + (PLAIN_PROTOCOL if plain else PROTOCOL)
+        style = template_for(config)
+        if config.get('input_format')=='balloon' and style==DEFAULT_TEMPLATE:style = style.replace('애니메이션 자막', '만화 말풍선')
+        system = style + '\n' + config.get('instructions', '') + '\n' + (PLAIN_PROTOCOL if plain else PROTOCOL)
         return [{'role':'system','content':system}, {'role':'user','content':json.dumps(payload,ensure_ascii=False)}]
     def cost(targets, cues, ids, issues=None):
         msg = messages(targets, cues, ids, issues)
@@ -242,12 +245,17 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                 if config.get('thinking','none')=='none' else '서버 기본값 · OFF 지시 미전송' if config.get('thinking')=='server' else config.get('thinking','서버 기본값'))
     if config.get('provider')!='polystrata': controls = '일반 호환 제공자 · Thinking 제어 미전송'
     emit('preflight','요청 설정: '+controls)
-    emit('preflight',f'{output_format(config).upper()} 일반 자막 · 서식 없이 대사만 번역합니다' if plain else 'ASS 구조 및 저장된 ID를 확인했습니다')
+    emit('preflight','벌룬 TXT · 페이지·말풍선 번호를 보존해 번역합니다' if config.get('input_format')=='balloon' else f'{output_format(config).upper()} 일반 자막 · 서식 없이 대사만 번역합니다' if plain else 'ASS 구조 및 저장된 ID를 확인했습니다')
     if not plain and config.get('strip_ass_decoration', False):
         emit('preflight','ASS 대사 내 색상·강조 태그 제거 · 위치·크기·너비·줄바꿈과 Style 정의는 유지합니다')
     outputs = []
     for (name, raw), doc in zip(files,documents):
         current.update(file=name); cues = doc.cues
+        for c in cues:
+            if getattr(c,'ocr_warnings',[]):
+                notice=dict(file=name,cue=c.id+1,page=c.page,block=c.block,issues=c.ocr_warnings,resolved=False)
+                if notice not in state['reviews']:state['reviews'].append(notice)
+                emit('preflight',f'페이지 {c.page} / 말풍선 {c.block}: 원문 OCR 확인 필요')
         file_key = digest([name,raw.hex()])
         ids = {c.id:_wire_id(file_key,c) for c in cues}
         frames = {c.id:frame_for(c) for c in cues}
@@ -380,7 +388,7 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                 ceiling = max(1,min(ceiling,int(max(1,len(found))*0.8)))
                 emit('retry','출력 한도 도달 · 완성된 정상 ID는 유지하고 남은 요청의 출력 예산을 조정합니다')
             pending = [c for c in pending if str(c.id) not in saved]
-        emit('saving',f'{name}: {output_format(config).upper()} 일반 자막으로 저장합니다' if plain else f'{name}: ASS 원본 구조로 저장합니다')
+        emit('saving',f'{name}: 벌룬 번역 TXT로 저장합니다' if config.get('input_format')=='balloon' else f'{name}: {output_format(config).upper()} 일반 자막으로 저장합니다' if plain else f'{name}: ASS 원본 구조로 저장합니다')
         outputs.append((output_name(name,config),doc.render(saved)))
     context = json.dumps(state['pairs'],ensure_ascii=False)
     if not state.get('complete'):

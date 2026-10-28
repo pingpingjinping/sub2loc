@@ -126,6 +126,7 @@ class MatchDialog(QDialog):
         self.tabs = QTabWidget()
         online = QWidget(); online_layout = QVBoxLayout(online)
         search_row = QHBoxLayout()
+        self.media_type = QComboBox();self.media_type.addItem("애니메이션","ANIME");self.media_type.addItem("만화","MANGA");online_layout.addWidget(self.media_type)
         self.query = QLineEdit(initial); self.query.setPlaceholderText('일본어·영문·로마자 작품명')
         self.query.setMaxLength(200); self.query.returnPressed.connect(self.search)
         self.search_button = button('검색', self.search, True)
@@ -185,7 +186,7 @@ class MatchDialog(QDialog):
         self.search_button.setEnabled(False)
         self.hint.setText('작품을 검색하고 있습니다…')
         self.results.clear()
-        self.task = Task(lambda: self.catalog.search(query), self)
+        self.task = Task(lambda: self.catalog.search(query) if self.media_type.currentData()=="ANIME" else self.catalog.search(query,media_type="MANGA"), self)
         self.task.result.connect(self.search_results)
         self.task.error.connect(self.hint.setText)
         self.task.finished.connect(self.search_finished)
@@ -392,6 +393,7 @@ class MainWindow(QMainWindow):
             form.addRow(text, widget)
         api_layout.addLayout(form)
         self.format_hint = label('', 'muted'); api_layout.addWidget(self.format_hint)
+        api_layout.addWidget(label('벌룬 TXT: 원문 내보내기 파일을 추가하세요. ID 기반 모드에서 페이지·말풍선 번호를 보존한 TXT로 저장합니다. OCR 의심 문자는 경고만 하며 이미지 확인을 대신하지 않습니다.', 'muted'))
         self.strip_ass_decoration = QCheckBox('ASS 대사 내 색상·강조 태그 제거 (위치·크기 유지)')
         self.strip_ass_decoration.setToolTip('색상 \\c·\\1c–\\4c와 굵게 \\b·기울임 \\i·밑줄 \\u·취소선 \\s만 제거합니다. Style 정의의 기본 색상·서식, 위치·크기·너비·투명도·줄바꿈은 유지합니다. 켜면 기존 ASS 저장분과 별도로 번역합니다.')
         api_layout.addWidget(self.strip_ass_decoration)
@@ -553,7 +555,7 @@ class MainWindow(QMainWindow):
         if path: self.add_paths([path])
 
     def choose_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, '자막 파일 선택', '', 'ASS 자막 (*.ass *.ASS)')
+        paths, _ = QFileDialog.getOpenFileNames(self, '자막 파일 선택', '', 'ASS / 벌룬 원문 TXT (*.ass *.ASS *.txt *.TXT)')
         if paths: self.add_paths(paths)
 
     def choose_output(self):
