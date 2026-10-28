@@ -65,7 +65,7 @@ class IdentifiedTests(unittest.TestCase):
         def limited(m,d,k):
             if len(m.calls)==1:return ChatResult(reply([dict(id=r['id'],text='태그 삭제') for r in d['translate']]),'length')
             return ChatResult(reply([answer(r) for r in d['translate']]),'stop')
-        model=Model(limited);self.run_model(ass([r'{\i1}猫{\i0}',r'{\i1}犬{\i0}']),model)
+        model=Model(limited);self.run_model(ass([r'猫{\i1}たち{\i0}',r'犬{\i1}たち{\i0}']),model)
         for data,_,_ in model.calls[1:]:
             self.assertEqual(set(data['repair_issues']),{r['id'] for r in data['translate']})
 
@@ -215,7 +215,7 @@ class IdentifiedTests(unittest.TestCase):
             rows=[answer(r) for r in d['translate']]
             if len(m.calls)==1: rows[1]['text']='태그 삭제'
             return ChatResult(reply(rows),'stop')
-        model=Model(broken); self.run_model(ass(['猫',r'{\i1}犬{\i0}']),model)
+        model=Model(broken); self.run_model(ass(['猫',r'犬{\i1}たち{\i0}']),model)
         self.assertEqual([len(c[0]['translate']) for c in model.calls],[2,1])
 
     def test_foreign_script_is_retranslated_but_interjection_is_safely_normalized(self):

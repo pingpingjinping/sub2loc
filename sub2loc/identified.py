@@ -8,6 +8,7 @@ import re
 import time
 from .api import ApiError, ChatResult, RequestError, StreamInterrupted, safe_preview
 from .ass import AssDocument, TOKEN
+from .framing import frame_for
 from .engine import atomic_json, digest, Cancelled
 from .profiles import template_for
 from .review import inspect_translation, normalize_interjection, structure_issues
@@ -116,6 +117,7 @@ class ResponseFormatError(ValueError):
 
     def __str__(self):
         d = self.diagnostic
+        rows='\n'.join(f"대사 {r['cue']}: {', '.join(r['issues'])}\n기대 토큰: {r['expected_tokens']} / 받은 토큰: {r['actual_tokens']}\n요청 문장: {r['source']}\n모델 응답: {r['reply']}" for r in d.get('failed_rows',[]))
         return (d.get('reason','응답에서 유효한 ID·번역문을 하나도 읽지 못해 자동 재요청을 중단했습니다.')+'\n'
                 f"파일: {d['file']} / 대사: {d['first']}–{d['last']}\n"
                 f"종료 사유: {d['finish_reason']} / 응답 {d['response_characters']}자 / 생각 채널 {d['reasoning_characters']}자 / 완성 JSON {d['parsed_values']}개\n"
@@ -124,7 +126,7 @@ class ResponseFormatError(ValueError):
                 '관측 ID 유형: '+json.dumps(d['observed_id_types'],ensure_ascii=False)+'\n'
                 '서버 토큰 수: '+json.dumps(d['usage'],ensure_ascii=False)+'\n'
                 f'진단 파일: {self.path}\n'
-                '생성된 응답 미리보기 (번역 API 탭의 테스트 · 오류 내용 복사로 복사):\n'
+                +rows+'\n생성된 응답 미리보기 (번역 API 탭의 테스트 · 오류 내용 복사로 복사):\n'
                 +(d['response_preview'] or '(본문이 비어 있습니다)')+'\n'
                 '응답 순서나 짧은 번호로 원본 ID를 추정해 연결하지 않았습니다. 정상 저장분은 유지합니다.')
 
@@ -201,7 +203,7 @@ def _run(folder, run_id, config, files, cancel, progress, client):
         fixed = config.get('notes', '')
         payload = dict(work=config['work'], episode=current.get('file'), fixed_notes=_bound(fixed, 4000),
                        recent_translations=state['pairs'][-4:], context=context,
-                       translate=[dict(id=ids[c.id], text=c.text, speaker=c.speaker) for c in targets])
+                       translate=[dict(id=ids[c.id], text=frames[c.id].source, speaker=c.speaker) for c in targets])
         if issues: payload['repair_issues'] = {ids[c.id]:issues.get(ids[c.id],[]) for c in targets}
         # Protocol is not user editable. Translation style lives in a template.
         system = template_for(config) + '\n' + config.get('instructions', '') + '\n' + PROTOCOL
@@ -266,6 +268,7 @@ def _run(folder, run_id, config, files, cancel, progress, client):
         current.update(file=name); cues = doc.cues
         file_key = digest([name,raw.hex()])
         ids = {c.id:_wire_id(file_key,c) for c in cues}
+        frames = {c.id:frame_for(c) for c in cues}
         by_id = {ids[c.id]:c for c in cues}; saved = state['files'][name]
         # Cached values are revalidated structurally before use.
         for key,value in saved.items():
@@ -290,7 +293,8 @@ def _run(folder, run_id, config, files, cancel, progress, client):
             expected = {ids[c.id] for c in group}
             found, duplicates, unknown = parse_rows(response.content,expected)
             usable = sum(isinstance(v,str) and bool(v.strip()) for v in found.values())
-            def format_failure(reason):
+            wire_reply=dict(found);wire_errors={}
+            def format_failure(reason,failed_rows=()):
                 key = getattr(client,'key','') or config.get('key','')
                 types = {}
                 items = response_items(response.content)
@@ -306,7 +310,12 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                      expected_id_examples=[ids[c.id] for c in group[:3]],
                      usage={k:v for k,v in response.usage.items() if k in ('prompt_tokens','completion_tokens','total_tokens') and type(v) is int},
                      max_tokens=output_limit,requests=requests,
-                     response_preview=safe_preview(response.content,key,2400))
+                     response_preview=safe_preview(response.content,key,2400),
+                     failed_rows=[dict(cue=c.id+1,issues=reasons.get(c.id,[]),
+                         source=safe_preview(frames[c.id].source,key,400),
+                         reply=safe_preview(wire_reply.get(ids[c.id],''),key,600),
+                         expected_tokens=frames[c.id].tokens[:20],
+                         actual_tokens=TOKEN.findall(wire_reply.get(ids[c.id],''))[:20] if isinstance(wire_reply.get(ids[c.id]),str) else []) for c in failed_rows[:5]])
                 errors.update((name,c.id) for c in group if str(c.id) not in saved)
                 checkpoint()
                 path = folder/'diagnostics'/'last-response.json'
@@ -316,6 +325,10 @@ def _run(folder, run_id, config, files, cancel, progress, client):
             if not usable:
                 raise format_failure('응답에서 유효한 ID·번역문을 하나도 읽지 못해 자동 재요청을 중단했습니다.')
             low_yield = len(group)>=5 and usable*5<=len(group) and response.finish_reason=='stop'
+            for identity,value in list(found.items()):
+                if isinstance(value,str):
+                    try:found[identity]=frames[by_id[identity].id].restore(value)
+                    except ValueError as exc:wire_errors[identity]=str(exc)
             if unknown: emit('review',f'요청에 없는 ID {len(unknown)}개를 제외했습니다')
             repeated = {}
             for key,value in found.items():
@@ -326,13 +339,14 @@ def _run(folder, run_id, config, files, cancel, progress, client):
             for keys in repeated.values():
                 if len(keys)>=3 and len({TOKEN.sub('',by_id[key].text) for key in keys})>=3:
                     repeated_ids.update(keys)
-            accepted = []
+            accepted = [];fatal=[]
             for cue in group:
                 key = ids[cue.id]; text = found.get(key); attempts[cue.id] = attempts.get(cue.id,0)+1
                 issues_for_cue = []
                 structural = True
                 if key in duplicates: issues_for_cue=['중복 ID']
                 elif not isinstance(text,str): issues_for_cue=['ID 누락 또는 출력 형식 오류']
+                elif key in wire_errors:issues_for_cue=[wire_errors[key]]
                 else:
                     normalized = normalize_interjection(cue.text,text)
                     issues_for_cue = inspect_translation(cue,normalized,korean=config.get('target','한국어').lower() in ('한국어','ko','korean','ko-kr'),allowed=allowed)
@@ -354,8 +368,7 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                     if not low_yield: emit('review',f'대사 {cue.id+1}: '+', '.join(issues_for_cue))
                     if low_yield or attempts[cue.id] <= max_repairs: continue
                     if cue.id not in candidates:
-                        checkpoint()
-                        raise ValueError(f"{name}: 대사 {cue.id+1}의 ID/ASS 구조를 {max_repairs}회 재번역 후에도 복구하지 못했습니다 ({', '.join(issues_for_cue)}). 정상 ID는 저장했습니다.")
+                        fatal.append(cue);continue
                     text = candidates[cue.id]
                     state['reviews'].append(dict(file=name,cue=cue.id+1,issues=issues_for_cue,resolved=False))
                 saved[str(cue.id)] = text; accepted.append(cue)
@@ -365,6 +378,8 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                 state['pairs'].append(dict(source=_bound(TOKEN.sub('',cue.text),300),target=_bound(TOKEN.sub('',saved[str(cue.id)]),400),speaker=cue.speaker))
             state['pairs'] = state['pairs'][-12:]
             checkpoint(); emit('validated',f'{done()} / {total} 대사 검증·저장 완료')
+            if fatal:
+                raise format_failure(f"{name}: 대사 {', '.join(str(c.id+1) for c in fatal[:8])}의 ID/ASS 구조를 {max_repairs}회 재번역 후에도 복구하지 못했습니다. 같은 응답의 정상 ID는 모두 저장했습니다.",fatal)
             if low_yield:
                 raise format_failure(f'{len(group)}개 요청 중 ID·번역문을 {usable}개만 인식해 대량 재요청을 중단했습니다. 검증된 대사는 저장했습니다.')
             if response.finish_reason=='length':
