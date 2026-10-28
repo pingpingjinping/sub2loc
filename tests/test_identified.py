@@ -4,6 +4,8 @@ import os
 import re
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -295,6 +297,20 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(len(AssDocument(out[0][1]).cues),100)
             self.assertTrue(any(d.get('tokens_per_second')==88.5 for d in updates))
             self.assertEqual(updates[-1]['done'],100)
+
+    def test_benchmark_cli_selects_037_to_136_without_claiming_semantic_verification(self):
+        self.structured=True
+        with tempfile.TemporaryDirectory() as root:
+            root=Path(root);original=ass(['猫']*150);path=root/'source.ass';path.write_bytes(original)
+            script=Path(__file__).resolve().parents[1]/'scripts'/'benchmark_polystrata.py'
+            result=subprocess.run([sys.executable,str(script),str(path),'--url',self.client.url,'--output',str(root/'out')],
+                                  capture_output=True,text=True,encoding='utf-8',timeout=30,
+                                  env=dict(os.environ,PYTHONUTF8='1'))
+            self.assertEqual(result.returncode,0,result.stderr)
+            report=json.loads(next((root/'out').glob('*.benchmark.json')).read_text('utf-8'))
+            self.assertEqual([r['original_number'] for r in report['lines']],list(range(37,137)))
+            self.assertFalse(report['semantic_quality_verified']);self.assertTrue(report['measured_on_command_host'])
+            self.assertEqual(path.read_bytes(),original)
 
     def test_real_stream_without_finish_salvages_complete_ids(self):
         self.structured=True; self.cut=True

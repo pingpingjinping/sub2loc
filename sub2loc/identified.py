@@ -260,10 +260,11 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                 reasons[cue.id] = issues_for_cue
                 if issues_for_cue:
                     errors.add((name,cue.id))
+                    emit('review',f'대사 {cue.id+1}: '+', '.join(issues_for_cue))
                     if attempts[cue.id] <= max_repairs: continue
                     if cue.id not in candidates:
                         checkpoint()
-                        raise ValueError(f'{name}: 대사 {cue.id+1}의 ID/ASS 구조를 {max_repairs}회 재번역 후에도 복구하지 못했습니다. 정상 ID는 저장했습니다.')
+                        raise ValueError(f"{name}: 대사 {cue.id+1}의 ID/ASS 구조를 {max_repairs}회 재번역 후에도 복구하지 못했습니다 ({', '.join(issues_for_cue)}). 정상 ID는 저장했습니다.")
                     text = candidates[cue.id]
                     state['reviews'].append(dict(file=name,cue=cue.id+1,issues=issues_for_cue,resolved=False))
                 saved[str(cue.id)] = text; accepted.append(cue)

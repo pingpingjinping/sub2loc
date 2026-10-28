@@ -37,7 +37,7 @@ def main():
         args.output.mkdir(parents=True,exist_ok=True)
         destination=write_result(args.output/f'{args.ass.stem}.sample-{args.start:03}-{args.end:03}.translated.ass',out[0][1])
         translated=AssDocument(out[0][1]);last=events[-1]
-        report=dict(measured_on_user_pc=True,elapsed_seconds=elapsed,start=args.start,end=args.end,
+        report=dict(measured_on_command_host=True,semantic_quality_verified=False,elapsed_seconds=elapsed,start=args.start,end=args.end,
              requests=last.get('requests'),retries=last.get('retries'),errors=last.get('errors'),
              tokens_per_second=last.get('tokens_per_second'),speed_kind=last.get('speed_kind'),review=engine.last_review,
              lines=[dict(original_number=args.start+i,source=TOKEN.sub('',a.text),translation=TOKEN.sub('',b.text))
