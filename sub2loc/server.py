@@ -35,6 +35,7 @@ def validate(data):
               'source': string('source', 100, 'auto'), 'target': string('target', 100, '한국어'),
               'notes': string('notes', 5000), 'encoding': string('encoding', 40, 'utf-8-sig'),
               'batch_size': integer('batch_size', 12, 1, 64),
+              'context_tokens': integer('context_tokens', 4096, 1024, 131072),
               'timeout': integer('timeout', 180, 5, 1800),
               'max_tokens': integer('max_tokens', 4096, 256, 32768)}
     if not config['work'] or not config['model'] or not config['target']:

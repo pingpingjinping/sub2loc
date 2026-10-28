@@ -35,12 +35,12 @@ class OutputLimitTests(unittest.TestCase):
                 if source.startswith('アキラ'):
                     raise OutputLimitError(limit, '번역 반복 ' * 300,
                                            {'prompt_tokens': 200, 'completion_tokens': limit})
-                return TRANSLATIONS[source]
+                return '\n'.join(TRANSLATIONS[row] for row in source.splitlines())
         with tempfile.TemporaryDirectory() as folder:
-            engine = Engine(Path(folder)); limited = Limited()
+            engine = Engine(Path(folder)); limited = Limited(); cfg = config(); cfg['batch_size'] = 1
             with self.assertRaises(OutputLimitError) as caught:
-                engine.translate(config(), [('episode.ass', SAMPLE)], client=limited)
-            self.assertEqual(len(limited.prompts), 2)  # One success, one failure; no duplicate request.
+                engine.translate(cfg, [('episode.ass', SAMPLE)], client=limited)
+            self.assertEqual(len(limited.prompts), 3)  # A smaller changed request after the two-span failure.
             self.assertEqual(caught.exception.filename, 'episode.ass')
             self.assertEqual(caught.exception.first, 2)
             self.assertIn('アキラ', str(caught.exception))
@@ -51,8 +51,8 @@ class OutputLimitTests(unittest.TestCase):
             self.assertEqual(set(state['translations']), {'0'})
             self.assertEqual(state['outputs'], [])
             recovered = Translator()
-            outputs, _ = engine.translate(config(), [('episode.ass', SAMPLE)], client=recovered)
-            self.assertEqual(len(recovered.prompts), 2)
+            outputs, _ = engine.translate(cfg, [('episode.ass', SAMPLE)], client=recovered)
+            self.assertEqual(len(recovered.prompts), 1)
             self.assertIn('좋은 아침'.encode(), outputs[0][1])
 
     def test_real_http_response_keeps_diagnostic_text_and_token_counts(self):
@@ -112,7 +112,7 @@ class OutputLimitUiTests(unittest.TestCase):
                 window = MainWindow(root / 'data'); window.show(); window.add_paths([source])
                 window.workspace.assign([0], Work.manual('내 작품')); window.refresh()
                 window.url.setText(f'http://127.0.0.1:{server.server_port}/v1')
-                window.model.setCurrentText(config()['model']); window.key.setText(key)
+                window.model.setCurrentText(config()['model']); window.key.setText(key); window.batch.setValue(1)
                 window.output.setText(str(root / 'output'))
                 QTest.mouseClick(window.start_button, Qt.MouseButton.LeftButton)
                 deadline = time.monotonic() + 10

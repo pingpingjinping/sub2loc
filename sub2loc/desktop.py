@@ -316,8 +316,12 @@ class MainWindow(QMainWindow):
         self.source = QLineEdit('auto'); self.target = QLineEdit('한국어')
         self.encoding = QComboBox()
         for text, value in [('UTF-8 (BOM 보존)', 'utf-8-sig'), ('UTF-16', 'utf-16'), ('일본어 CP932', 'cp932'), ('한국어 CP949', 'cp949')]: self.encoding.addItem(text, value)
+        self.context_tokens = QSpinBox(); self.context_tokens.setRange(1024, 131072)
+        self.context_tokens.setSingleStep(1024); self.context_tokens.setValue(4096)
+        self.context_tokens.setToolTip('Bionic에 실제 로드한 컨텍스트 크기와 맞추세요. 서버 설정을 자동으로 바꾸지는 않습니다.')
         self.batch = QSpinBox(); self.batch.setRange(1, 64); self.batch.setValue(12)
         self.tokens = QSpinBox(); self.tokens.setRange(256, 32768); self.tokens.setSingleStep(256); self.tokens.setValue(4096)
+        self.tokens.setToolTip('ja-ko-vn 전용 모드에서는 컨텍스트 절반 이하로 출력 공간을 예약합니다.')
         self.timeout = QSpinBox(); self.timeout.setRange(5, 1800); self.timeout.setValue(180); self.timeout.setSuffix(' 초')
         for text, widget in [('API 기본 주소', self.url), ('모델', self.model), ('호출 방식', self.api_mode), ('API 키', self.key)]:
             form.addRow(text, widget)
@@ -337,7 +341,7 @@ class MainWindow(QMainWindow):
         advanced_button = QPushButton('상세 번역 설정 펼치기'); advanced_button.setCheckable(True)
         advanced = QWidget(); advanced_form = QFormLayout(advanced)
         for text, widget in [('원문 언어', self.source), ('번역 언어', self.target), ('원본 인코딩', self.encoding),
-                             ('묶음 대사 수', self.batch), ('최대 출력 토큰', self.tokens), ('응답 제한 시간', self.timeout)]:
+                             ('묶음 최대 대사', self.batch), ('컨텍스트 토큰', self.context_tokens), ('최대 출력 토큰', self.tokens), ('응답 제한 시간', self.timeout)]:
             advanced_form.addRow(text, widget)
         advanced.setVisible(False); advanced_button.toggled.connect(advanced.setVisible)
         api_layout.addWidget(advanced_button); api_layout.addWidget(advanced); api_layout.addStretch()
@@ -374,7 +378,7 @@ class MainWindow(QMainWindow):
         for key, widget in [('url', self.url), ('source', self.source), ('target', self.target), ('output', self.output)]:
             if key in s: widget.setText(str(s[key]))
         self.model.setCurrentText(s.get('model', ''))
-        for key, widget in [('batch_size', self.batch), ('max_tokens', self.tokens), ('timeout', self.timeout)]:
+        for key, widget in [('batch_size', self.batch), ('context_tokens', self.context_tokens), ('max_tokens', self.tokens), ('timeout', self.timeout)]:
             if isinstance(s.get(key), int): widget.setValue(s[key])
         mode_index = self.api_mode.findData(s.get('api_mode', 'auto'))
         if mode_index >= 0: self.api_mode.setCurrentIndex(mode_index)
@@ -383,7 +387,7 @@ class MainWindow(QMainWindow):
 
     def settings(self):
         return dict(url=self.url.text().strip(), model=self.model.currentText().strip(), key=self.key.text(),
-                    api_mode=self.api_mode.currentData(),
+                    api_mode=self.api_mode.currentData(), context_tokens=self.context_tokens.value(),
                     source=self.source.text().strip() or 'auto', target=self.target.text().strip(),
                     encoding=self.encoding.currentData(), batch_size=self.batch.value(),
                     max_tokens=self.tokens.value(), timeout=self.timeout.value())
@@ -533,11 +537,11 @@ class MainWindow(QMainWindow):
     def update_api_hint(self, *_):
         try:
             special = mode_for(self.settings()) == 'ja-ko-vn'
-            self.batch.setEnabled(not special)
+            self.batch.setEnabled(True)
             self.api_hint.setText(
-                'ja-ko-vn 전용: 일본어 텍스트 구간을 Completions로 번역합니다. '
-                'ASS 태그는 앱에서 보존하며, 작품별 메모와 최근 대사를 참고 정보로 보냅니다. '
-                '자동 줄거리 요약은 요청하지 않습니다. 최대 출력은 1024토큰으로 제한합니다.' if special else
+                'ja-ko-vn 전용: 컨텍스트 안에 들어가는 연속 대사를 묶어 번역합니다. '
+                '입력·메모·이전 대사·출력 공간을 함께 계산하고, 잘리거나 줄 대응이 다르면 더 작게 나눕니다. '
+                '컨텍스트는 Bionic의 실제 로드 설정과 맞추세요. 출력 예약은 설정값과 컨텍스트 절반 중 작은 값입니다.' if special else
                 '범용 대화형: 대사 묶음과 JSON 응답을 사용합니다. 자막과 작품 메모는 설정한 API 서버로 전송됩니다.')
         except ValueError as exc:
             self.api_hint.setText(str(exc))

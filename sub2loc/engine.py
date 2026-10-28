@@ -6,7 +6,8 @@ from pathlib import Path
 import threading
 from .ass import AssDocument
 from .api import Client, ApiError, OutputLimitError
-from .jako import mode_for, translate_cue, remember, PromptError
+from .jako import mode_for, PromptError
+from .chunks import choose_end, translate_adaptive
 
 PROMPT_VERSION = 1
 SYSTEM = '''You translate anime ASS subtitles accurately and naturally for the requested target language.
@@ -83,7 +84,10 @@ class Engine:
         mode = mode_for(config)
         identity = {k: v for k, v in config.items() if k not in ('key', 'api_mode')}
         if mode == 'ja-ko-vn':
-            identity['request_mode'] = 'ja-ko-vn-v1'
+            identity['request_mode'] = 'ja-ko-vn-v2'
+            identity.setdefault('context_tokens', 4096)
+        else:
+            identity.pop('context_tokens', None)
         run_id = digest({'version': PROMPT_VERSION, 'config': identity,
                          'files': [(n, hashlib.sha256(b).hexdigest()) for n, b in files]})
         project_key = config.get('work_id') or config['work']
@@ -93,6 +97,16 @@ class Engine:
         folder = self.root / project_id
         project_path = folder / 'project.json'
         run_path = folder / 'runs' / (run_id + '.json')
+        if mode == 'ja-ko-vn' and not run_path.exists() and identity['context_tokens'] == 4096:
+            legacy_identity = dict(identity, request_mode='ja-ko-vn-v1')
+            legacy_identity.pop('context_tokens')
+            legacy_id = digest({'version': PROMPT_VERSION, 'config': legacy_identity,
+                                'files': [(n, hashlib.sha256(b).hexdigest()) for n, b in files]})
+            legacy_path = folder / 'runs' / (legacy_id + '.json')
+            if legacy_path.exists():
+                legacy = json.loads(legacy_path.read_text('utf-8'))
+                if not legacy.get('complete'):
+                    atomic_json(run_path, legacy)
         project = json.loads(project_path.read_text('utf-8')) if project_path.exists() else {'work': config['work'], 'context': ''}
         state = json.loads(run_path.read_text('utf-8')) if run_path.exists() else {
             'context': project['context'], 'file': 0, 'offset': 0, 'translations': {}, 'outputs': [],
@@ -109,6 +123,33 @@ class Engine:
                 if cancel.is_set():
                     raise Cancelled('번역을 중단했습니다. 같은 파일·설정으로 시작하면 이어서 처리합니다.')
                 start = state['offset']
+                if mode == 'ja-ko-vn':
+                    context_tokens = config.get('context_tokens', 4096)
+                    end = choose_end(cues, start, config['batch_size'], config['notes'],
+                                     state.get('recent_pairs', []), config['max_tokens'], context_tokens)
+                    def check_cancel():
+                        if cancel.is_set():
+                            raise Cancelled('번역을 중단했습니다. 저장된 묶음부터 재개할 수 있습니다.')
+                    def report(**data):
+                        message = data.pop('message', '')
+                        progress(file=name, done=sum(len(d.cues) for d in documents[:file_index]) + state['offset'],
+                                 total=total, message=f'{name}: {message}', **data)
+                    def commit(accepted, translated, pairs, context):
+                        for cue in accepted:
+                            cue.restore(translated[str(cue.id)]).encode(document.output_encoding, errors='strict')
+                        state['translations'].update(translated)
+                        state['recent_pairs'], state['context'] = pairs, context
+                        state['offset'] = accepted[-1].id + 1
+                        atomic_json(run_path, state)
+                        report(phase='validated', message=f"{state['offset']} / {len(cues)} 대사 검증·저장 완료")
+                    try:
+                        translate_adaptive(cues[start:end], client, config['notes'], state.get('recent_pairs', []),
+                                           config['max_tokens'], context_tokens, on_chunk=commit,
+                                           progress=report, check_cancel=check_cancel, cancel=cancel)
+                    except OutputLimitError as exc:
+                        exc.filename = name
+                        raise
+                    continue
                 # Both line count and character budget bound small-model requests.
                 end = start
                 chars = 0
@@ -118,8 +159,6 @@ class Engine:
                         break
                     chars += length
                     end += 1
-                if mode == 'ja-ko-vn':
-                    end = start + 1
                 batch = cues[start:end]
                 payload = {'work': config['work'], 'episode': name,
                            'source_language': config['source'], 'target_language': config['target'],
@@ -135,17 +174,8 @@ class Engine:
                     if cancel.is_set():
                         raise Cancelled('번역을 중단했습니다. 저장된 묶음부터 재개할 수 있습니다.')
                     try:
-                        if mode == 'ja-ko-vn':
-                            def check_cancel():
-                                if cancel.is_set():
-                                    raise Cancelled('번역을 중단했습니다. 저장된 대사부터 재개할 수 있습니다.')
-                            text = translate_cue(batch[0], client, config['notes'],
-                                                 state.get('recent_pairs', []), config['max_tokens'], check_cancel)
-                            translated = {str(batch[0].id): text}
-                            pairs, context = remember(batch[0], text, state.get('recent_pairs', []))
-                        else:
-                            raw = client.complete(messages)
-                            translated, context = parse_reply(raw, batch)
+                        raw = client.complete(messages)
+                        translated, context = parse_reply(raw, batch)
                         break
                     except PromptError:
                         raise
@@ -160,8 +190,6 @@ class Engine:
                             raise Cancelled('번역을 중단했습니다.')
                     except (ValueError, KeyError, TypeError, AttributeError):
                         if attempt == 2:
-                            if mode == 'ja-ko-vn':
-                                raise ValueError(f'{name}: 번역문이 비어 있거나 새 제어문자가 들어와 3회 검증에 실패했습니다.') from None
                             raise ValueError(f'{name}: JSON·대사 ID·ASS 토큰 검증이 3회 실패했습니다. 묶음 크기를 줄여 보세요.') from None
                         progress(file=name, phase='retry',
                                  message=f'{name}: 응답 형식 검증 실패 · 재시도 {attempt + 2}/3')
@@ -171,8 +199,6 @@ class Engine:
                 # Ensure output encoding works before checkpointing this batch.
                 for cue in batch:
                     cue.restore(translated[str(cue.id)]).encode(document.output_encoding, errors='strict')
-                if mode == 'ja-ko-vn':
-                    state['recent_pairs'] = pairs
                 state['translations'].update(translated)
                 state['context'], state['offset'] = context, end
                 atomic_json(run_path, state)

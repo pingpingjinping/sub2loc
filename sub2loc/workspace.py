@@ -161,6 +161,9 @@ def validate_settings(settings):
             raise ValueError(f'{key} 설정이 올바르지 않습니다.')
     if config.get('encoding') not in ('utf-8-sig', 'utf-16', 'cp932', 'cp949'):
         raise ValueError('원본 인코딩을 확인하세요.')
+    config.setdefault('context_tokens', 4096)
+    if type(config['context_tokens']) is not int or not 1024 <= config['context_tokens'] <= 131072:
+        raise ValueError('컨텍스트 크기는 1024–131072 범위로 입력하세요.')
     mode_for(config)
     return config
 
