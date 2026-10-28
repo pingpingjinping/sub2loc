@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import threading
 from .ass import AssDocument
-from .api import Client, ApiError
+from .api import Client, ApiError, OutputLimitError
 from .jako import mode_for, translate_cue, remember, PromptError
 
 PROMPT_VERSION = 1
@@ -149,8 +149,10 @@ class Engine:
                         break
                     except PromptError:
                         raise
-                    except ApiError:
-                        if attempt == 2:
+                    except ApiError as exc:
+                        if isinstance(exc, OutputLimitError):
+                            exc.filename, exc.first, exc.last = name, start + 1, end
+                        if attempt == 2 or not exc.retryable:
                             raise
                         progress(file=name, phase='retry',
                                  message=f'{name}: API 요청 실패 · 재시도 {attempt + 2}/3')

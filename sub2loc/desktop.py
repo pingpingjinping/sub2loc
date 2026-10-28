@@ -328,7 +328,10 @@ class MainWindow(QMainWindow):
         api_layout.addWidget(self.probe_button)
         self.probe_result = QPlainTextEdit(); self.probe_result.setReadOnly(True)
         self.probe_result.setPlaceholderText('오늘은 좋은 날씨네요 — 같은 짧은 번역으로 실제 API 응답을 확인해요.')
-        self.probe_result.setMaximumHeight(100); api_layout.addWidget(self.probe_result)
+        self.probe_result.setMaximumHeight(140); api_layout.addWidget(self.probe_result)
+        self.copy_result_button = button('테스트 · 오류 내용 복사',
+                                         lambda: QApplication.clipboard().setText(self.probe_result.toPlainText()))
+        api_layout.addWidget(self.copy_result_button)
         self.api_hint = label('', 'muted')
         api_layout.addWidget(self.api_hint)
         advanced_button = QPushButton('상세 번역 설정 펼치기'); advanced_button.setCheckable(True)
@@ -636,7 +639,9 @@ class MainWindow(QMainWindow):
         for entry in self.workspace.entries:
             if entry.status == '번역 중': entry.status = '중단' if self.worker.cancel.is_set() else '오류'
             elif entry.status == '대기': entry.status = '준비'
-        self.status.setText(message)
+        self.probe_result.setPlainText(message)
+        self.settings_tabs.setCurrentIndex(1)
+        self.status.setText(message.splitlines()[0] + ' · 번역 API 탭에서 상세 확인')
 
     def job_finished(self):
         self.wait_timer.stop(); self.request_started = None

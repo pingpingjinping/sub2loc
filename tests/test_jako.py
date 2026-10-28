@@ -121,7 +121,7 @@ class CompletionHttpTests(unittest.TestCase):
         self.assertNotIn('messages', body)
         self.assertEqual(body['max_tokens'], 1024)
         self.assertEqual(body['temperature'], 0.1)
-        self.assertEqual(body['stop'], ['<end_of_turn>', '<eos>'])
+        self.assertEqual(body['stop'], ['<end_of_turn>', '<eos>', '<start_of_turn>'])
 
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')

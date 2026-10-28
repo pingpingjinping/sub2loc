@@ -4,7 +4,49 @@ from urllib import request, error, parse
 
 
 class ApiError(RuntimeError):
-    pass
+    def __init__(self, message, *, retryable=True):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def safe_preview(text, key='', limit=600):
+    text = text if isinstance(text, str) else ''
+    if key:
+        text = text.replace(key, '[API 키 삭제]')
+    text = ''.join(c for c in text if c in '\n\t' or ord(c) >= 32)
+    if len(text) > limit:
+        text = text[:limit * 2 // 3] + '\n… [중간 생략] …\n' + text[-limit // 3:]
+    return text
+
+
+class OutputLimitError(ApiError):
+    """A failed response is diagnostic data, never a successful partial translation."""
+    def __init__(self, limit, output, usage=None, key=''):
+        super().__init__(f'번역 출력이 한도에 도달했습니다. 요청 상한: {limit}토큰.', retryable=False)
+        self.output_preview = safe_preview(output, key)
+        self.source_preview = ''
+        self.filename = ''
+        self.first = self.last = 0
+        usage = usage if isinstance(usage, dict) else {}
+        self.usage = {k: v for k, v in usage.items()
+                      if k in ('prompt_tokens', 'completion_tokens', 'total_tokens') and type(v) is int}
+
+    def with_source(self, source, key=''):
+        self.source_preview = safe_preview(source, key, 240)
+        return self
+
+    def __str__(self):
+        parts = [super().__str__()]
+        if self.filename:
+            parts.append(f'파일: {self.filename} / 대사: {self.first}–{self.last}')
+        if self.usage:
+            parts.append('서버 토큰 수: ' + ', '.join(f'{k}={v}' for k, v in self.usage.items()))
+        parts.append('같은 요청은 자동 재시도하지 않았고, 잘린 응답은 번역 결과로 저장하지 않았습니다.')
+        if self.source_preview:
+            parts += ['요청한 원문:', self.source_preview]
+        parts += ['생성된 출력 미리보기:', self.output_preview or '(빈 응답)']
+        return '\n'.join(parts)
+
 
 
 def base_url(value: str) -> str:
@@ -49,11 +91,11 @@ class Client:
         data = self.call('/chat/completions', {'model': self.model, 'messages': messages,
                          'temperature': 0.2, 'max_tokens': self.max_tokens, 'stream': False})
         try:
-            if data['choices'][0].get('finish_reason') == 'length':
-                raise ApiError('출력이 잘렸습니다. 묶음 크기를 줄이거나 최대 출력 토큰을 늘리세요.')
             content = data['choices'][0]['message']['content']
             if not isinstance(content, str):
                 raise TypeError()
+            if data['choices'][0].get('finish_reason') == 'length':
+                raise OutputLimitError(self.max_tokens, content, data.get('usage'), self.key)
             return content
         except (KeyError, IndexError, TypeError):
             raise ApiError('chat/completions 응답 형식이 맞지 않습니다.') from None
@@ -62,13 +104,13 @@ class Client:
     def complete_text(self, prompt, max_tokens=1024):
         data = self.call('/completions', {'model': self.model, 'prompt': prompt,
                          'temperature': 0.1, 'max_tokens': max_tokens, 'stream': False,
-                         'stop': ['<end_of_turn>', '<eos>'], 'echo': False})
+                         'stop': ['<end_of_turn>', '<eos>', '<start_of_turn>'], 'echo': False})
         try:
-            if data['choices'][0].get('finish_reason') == 'length':
-                raise ApiError('번역 출력이 잘렸습니다. 모델 컨텍스트 길이와 최대 출력 토큰을 확인하세요.')
             content = data['choices'][0]['text']
             if not isinstance(content, str):
                 raise TypeError()
+            if data['choices'][0].get('finish_reason') == 'length':
+                raise OutputLimitError(max_tokens, content, data.get('usage'), self.key)
             return content
         except (KeyError, IndexError, TypeError):
             raise ApiError('completions 응답 형식이 맞지 않습니다. 서버의 /v1/completions 지원을 확인하세요.') from None

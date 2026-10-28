@@ -5,6 +5,7 @@ https://huggingface.co/hell0ks/ja-ko-vn-12b-v2-gguf/blob/main/template
 """
 import re
 from .ass import TOKEN
+from .api import OutputLimitError
 
 INSTRUCTION = '당신은 전문 일한 번역가입니다. 주어진 일본어를 한국어로 번역하세요.'
 MODES = ('auto', 'chat', 'ja-ko-vn')
@@ -70,7 +71,10 @@ def translate_cue(cue, client, notes, pairs, max_tokens, check_cancel=lambda: No
             else:
                 check_cancel()
                 prompt, limit = prompt_for(body, notes, pairs, max_tokens)
-                translated = client.complete_text(prompt, limit).strip()
+                try:
+                    translated = client.complete_text(prompt, limit).strip()
+                except OutputLimitError as exc:
+                    raise exc.with_source(body, getattr(client, 'key', '')) from None
                 if not translated:
                     raise ValueError('번역문이 비어 있습니다.')
                 start = len(text) - len(text.lstrip())

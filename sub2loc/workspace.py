@@ -7,7 +7,7 @@ import re
 import threading
 from typing import Callable
 from .ass import AssDocument
-from .api import base_url
+from .api import base_url, OutputLimitError
 from .jako import mode_for
 from .engine import Engine, Cancelled, atomic_json, digest
 
@@ -209,7 +209,12 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
                     original = Path(workspace.entries[data['index']].path).name
                     data['message'] = data['message'].replace(data['file'], original)
             progress(**data)
-        outputs, context = engine.translate(config, files, cancel, report, client)
+        try:
+            outputs, context = engine.translate(config, files, cancel, report, client)
+        except OutputLimitError as exc:
+            if exc.filename in mapping:
+                exc.filename = Path(workspace.entries[mapping[exc.filename]].path).name
+            raise
         for (index, _), (_, raw), target in zip(entries, outputs, targets):
             saved = write_result(target, raw)
             results.append(str(saved))
