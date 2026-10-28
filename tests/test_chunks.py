@@ -96,8 +96,8 @@ class ChunkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             client = Limited()
             output, _ = Engine(Path(folder)).translate(config(), [('test.ass', raw)], client=client)
-            self.assertEqual(len(client.sources), 7)
-            self.assertEqual(len(set(client.sources)), 7)
+            self.assertEqual(len(client.sources), 5)
+            self.assertEqual(len(set(client.sources)), 5)
             before, after = AssDocument(raw), AssDocument(output[0][1])
             for original, translated in zip(before.cues, after.cues):
                 self.assertEqual(original.prefix, translated.prefix)
@@ -154,6 +154,30 @@ class ChunkTests(unittest.TestCase):
             self.assertEqual(len(client.prompts), 1)
             self.assertIn('おはよう、ミサキ。', client.prompts[0].split('<start_of_turn>user\n')[1])
             self.assertEqual(json.loads(old_path.read_text())['offset'], 1)
+
+    def test_v026_checkpoint_resumes_without_retranslating_saved_cues(self):
+        from sub2loc.jako import remember
+        cfg = config()
+        identity = {k: v for k, v in cfg.items() if k not in ('key', 'api_mode')}
+        identity.update(request_mode='ja-ko-vn-v3', context_tokens=4096)
+        run_id = digest({'version': PROMPT_VERSION, 'config': identity,
+                         'files': [('resume.ass', hashlib.sha256(SAMPLE).hexdigest())]})
+        project_id = digest({'work': cfg['work'], 'mode': 'ja-ko-vn-v3'})[:24]
+        cue = AssDocument(SAMPLE).cues[0]
+        translated = cue.text.replace('おはよう、ミサキ。', '저장된 첫 번역')
+        pairs, context = remember(cue, translated, [])
+        with tempfile.TemporaryDirectory() as folder:
+            checkpoint = Path(folder) / project_id / 'runs' / (run_id + '.json')
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text(json.dumps(dict(file=0, offset=1, translations={'0': translated},
+                                                 outputs=[], context=context, recent_pairs=pairs)))
+            client = Translator()
+            output, _ = Engine(Path(folder)).translate(cfg, [('resume.ass', SAMPLE)], client=client)
+            self.assertEqual(len(client.prompts), 1)
+            source = client.prompts[0].split('<start_of_turn>user\n')[1].split('<end_of_turn>')[0]
+            self.assertNotIn('おはよう、ミサキ。', source)
+            self.assertNotIn('{', source)
+            self.assertIn('저장된 첫 번역'.encode(), output[0][1])
 
 
 if __name__ == '__main__': unittest.main()

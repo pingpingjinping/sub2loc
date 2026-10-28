@@ -608,8 +608,8 @@ class MainWindow(QMainWindow):
             special = mode_for(self.settings()) == 'ja-ko-vn'
             self.batch.setEnabled(True)
             self.api_hint.setText(
-                'ja-ko-vn 전용: 태그를 포함한 대사 전체를 먼저 번역하고 원본 태그를 검증합니다. '
-                '검증 실패 시 더 작은 묶음, 필요하면 구간별 번역으로 전환합니다. '
+                'ja-ko-vn 전용: 서식으로 쪼개지 않고 대사 전체를 번역합니다. 줄 수가 다르면 그 묶음만 대사별로 처리합니다. '
+                '태그는 앱이 보존하며, 내부 서식·줄바꿈 위치는 번역문 길이와 단어 경계로 조정하므로 확인이 필요합니다. '
                 '컨텍스트는 Bionic의 실제 로드 설정과 맞추세요. 출력 예약은 설정값과 컨텍스트 절반 중 작은 값입니다.' if special else
                 '범용 대화형: 대사 묶음과 JSON 응답을 사용합니다. 자막과 작품 메모는 설정한 API 서버로 전송됩니다.')
         except ValueError as exc:

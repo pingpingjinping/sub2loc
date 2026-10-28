@@ -1,49 +1,25 @@
-"""Context-budgeted ASS chunks with positional alignment and adaptive splitting."""
-from dataclasses import dataclass
+"""Context-bounded complete cues with direct, cue-level alignment recovery."""
 import re
 import threading
 from .api import ApiError, OutputLimitError, safe_preview
-from .ass import TOKEN, protect
+from .ass import TOKEN
 from .jako import PromptError, prompt_for, remember
+from .layout import layout_for
 
 
 class AlignmentError(ValueError):
     pass
 
 
-@dataclass
-class Piece:
-    source: str
-    before: str = ''
-    after: str = ''
-
-
-@dataclass
-class CuePlan:
-    cue: object
-    parts: list
-
-    @property
-    def pieces(self):
-        return [part for part in self.parts if isinstance(part, Piece)]
-
-    def render(self, translated):
-        text = ''.join(part if isinstance(part, str) else
-                       part.before + translated[id(part)] + part.after for part in self.parts)
-        self.cue.restore(text)
-        return text
-
-
 def source_budget(notes, pairs, max_tokens, context_tokens):
-    base, limit = prompt_for('', '', [], max_tokens, context_tokens, multiline=True, preserve_controls=True)
-    # Reserve some context for names and recent translations before packing input.
+    base, limit = prompt_for('', '', [], max_tokens, context_tokens, multiline=True)
     hints = len(notes.encode('utf-8')) + sum(len(str(p).encode('utf-8')) for p in pairs[-6:])
     reserve = min(hints, 768, context_tokens // 6)
     return max(32, context_tokens - limit - 64 - len(base.encode('utf-8')) - reserve)
 
 
 def split_text(text, budget):
-    """Retain every source character; prefer punctuation/space boundaries."""
+    """Only split a cue that exceeds context; prefer sentence boundaries."""
     while text:
         prefix = text.encode('utf-8')[:budget].decode('utf-8', errors='ignore')
         if not prefix:
@@ -57,30 +33,11 @@ def split_text(text, budget):
         text = text[len(prefix):]
 
 
-def make_plan(cue, budget):
-    parts, pos = [], 0
-    for match in list(TOKEN.finditer(cue.text)) + [None]:
-        end = match.start() if match else len(cue.text)
-        text = cue.text[pos:end]
-        for chunk in split_text(text, budget):
-            body = chunk.strip()
-            if not body or not re.search(r'[^\W\d_]', body, re.UNICODE):
-                parts.append(chunk)
-            else:
-                first = len(chunk) - len(chunk.lstrip())
-                trail = len(chunk) - len(chunk.rstrip())
-                parts.append(Piece(body, chunk[:first], chunk[len(chunk) - trail:] if trail else ''))
-        if match:
-            parts.append(match.group()); pos = match.end()
-    return CuePlan(cue, parts)
-
-
-def choose_end(cues, start, batch_size, notes, pairs, max_tokens, context_tokens, *, preserve_controls=True):
+def choose_end(cues, start, batch_size, notes, pairs, max_tokens, context_tokens):
     budget = source_budget(notes, pairs, max_tokens, context_tokens)
     used, end = 0, start
     while end < len(cues) and end - start < batch_size:
-        cost = (len(cues[end].restore(cues[end].text).encode('utf-8')) + 1 if preserve_controls else
-                sum(len(p.source.encode('utf-8')) + 1 for p in make_plan(cues[end], budget).pieces))
+        cost = len(layout_for(cues[end]).source.encode('utf-8')) + 1
         if end > start and used + cost > budget:
             break
         used += cost; end += 1
@@ -89,21 +46,20 @@ def choose_end(cues, start, batch_size, notes, pairs, max_tokens, context_tokens
 
 def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *,
                        on_chunk, progress=lambda **kwargs: None, check_cancel=lambda: None,
-                       cancel=None, strategy_state=None):
-    """Commit each validated subchunk immediately; failed results never shift rows."""
+                       cancel=None):
+    """Reject ambiguous batches once, then checkpoint complete cues directly."""
     cancel = cancel or threading.Event()
-    strategy_state = strategy_state if strategy_state is not None else {}
     budget = source_budget(notes, pairs, max_tokens, context_tokens)
-    plans = [make_plan(cue, budget) for cue in cues]
+    layouts = [layout_for(cue) for cue in cues]
 
-    def request(pieces, history, first, last, *, preserve_controls=False):
-        source = '\n'.join(p.source for p in pieces)
+    def request(sources, history, first, last):
+        source = '\n'.join(sources)
         prompt, limit = prompt_for(source, notes, history, max_tokens, context_tokens,
-                                   multiline=len(pieces) > 1, preserve_controls=preserve_controls)
+                                   multiline=len(sources) > 1)
         for attempt in range(3):
             check_cancel()
             progress(phase='request', first=first, last=last,
-                     message=f'{first}–{last} 대사 · {len(pieces)}개 텍스트 구간 요청')
+                     message=f'{first}–{last} 대사 · {len(sources)}개 문장 요청 (태그는 로컬 보존)')
             try:
                 raw = client.complete_text(prompt, limit)
                 break
@@ -117,105 +73,51 @@ def translate_adaptive(cues, client, notes, pairs, max_tokens, context_tokens, *
                 if cancel.wait(1 + attempt):
                     check_cancel()
         rows = raw.strip().splitlines()
-        if len(rows) != len(pieces) or any(not row.strip() for row in rows):
+        # With one cue, visual line breaks cannot shift a different cue.
+        # Original ASS line breaks stay local and replace this whitespace.
+        if len(sources) == 1:
+            rows = [' '.join(row.strip() for row in rows if row.strip())]
+        if len(rows) != len(sources) or any(not row.strip() for row in rows):
             raise AlignmentError(
-                f'대사 {first}–{last}: 번역 줄 수 불일치 (원문 {len(pieces)}줄 / 응답 {len(rows)}줄).\n'
+                f'대사 {first}–{last}: 번역 줄 수 불일치 (원문 {len(sources)}줄 / 응답 {len(rows)}줄).\n'
                 '요청한 원문:\n' + safe_preview(source, getattr(client, 'key', ''), 240) +
                 '\n생성된 출력 미리보기:\n' + safe_preview(raw, getattr(client, 'key', '')))
-        # A model may not inject a new protected token or ASS control into a span.
         for row in rows:
-            if not preserve_controls and (TOKEN.search(row) or re.search(r'[{}\r\n]|\\[Nnh]', row)):
+            if TOKEN.search(row) or re.search(r'[{}\r\n]|\\[Nnh]', row):
                 raise AlignmentError(f'대사 {first}–{last}: 번역문에 새 ASS 제어문자가 포함되었습니다.')
-        return {id(piece): row.strip() for piece, row in zip(pieces, rows)}
+        # Keep whitespace at context-split seams without adding spaces within
+        # Japanese/Korean words. Echoes retain the complete original layout.
+        return [original if row.strip() == original.strip() else
+                original[:len(original) - len(original.lstrip())] + row.strip() +
+                (original[len(original.rstrip()):] if original.rstrip() != original else '')
+                for original, row in zip(sources, rows)]
 
-    def split_reason(exc, count):
-        reason = '출력 한도' if isinstance(exc, OutputLimitError) else (
-                 '컨텍스트 예산' if isinstance(exc, PromptError) else '줄·태그 대응')
-        detail = str(exc).splitlines()[0]
-        progress(phase='retry', message=f'{reason}: {detail} · {count}개 묶음을 더 작게 나눕니다')
-
-    def translate_pieces(pieces, history, cue_id):
-        if not pieces:
-            return {}
-        try:
-            return request(pieces, history, cue_id, cue_id)
-        except (AlignmentError, OutputLimitError, PromptError) as exc:
-            if len(pieces) <= 1:
-                raise
-            split_reason(exc, len(pieces))
-            mid = len(pieces) // 2
-            result = translate_pieces(pieces[:mid], history, cue_id)
-            result.update(translate_pieces(pieces[mid:], history, cue_id))
-            return result
-
-    def accept(group, translated, history):
+    def accept(group, values, history):
+        translated = {str(plan.cue.id): plan.render(value) for plan, value in zip(group, values)}
         context = ''
         for plan in group:
             history, context = remember(plan.cue, translated[str(plan.cue.id)], history)
+        # Encoding/persistence errors must never be mistaken for model errors.
         on_chunk([plan.cue for plan in group], translated, history, context)
         return history
 
-    def run_spans(group, history):
+    def individual(plan, history):
         check_cancel()
-        pieces = [piece for plan in group for piece in plan.pieces]
-        try:
-            values = request(pieces, history, group[0].cue.id + 1, group[-1].cue.id + 1) if pieces else {}
-            translated = {str(plan.cue.id): plan.render(values) for plan in group}
-        except (OutputLimitError, ValueError) as exc:
-            if len(group) > 1:
-                split_reason(exc, len(group)); mid = len(group) // 2
-                history = run_spans(group[:mid], history)
-                return run_spans(group[mid:], history)
-            if len(pieces) <= 1: raise
-            split_reason(exc, len(pieces)); mid = len(pieces) // 2
-            values = translate_pieces(pieces[:mid], history, group[0].cue.id + 1)
-            values.update(translate_pieces(pieces[mid:], history, group[0].cue.id + 1))
-            translated = {str(group[0].cue.id): group[0].render(values)}
-        return accept(group, translated, history)
+        parts = list(split_text(plan.source, budget))
+        if len(parts) > 1:
+            progress(phase='retry', message=f'대사 {plan.cue.id + 1}: 문장 전체가 컨텍스트 예산을 넘어 {len(parts)}개로 나눕니다')
+        values = [request([part], history, plan.cue.id + 1, plan.cue.id + 1)[0] for part in parts]
+        return accept([plan], [''.join(values)], history)
 
-    def run(group, history):
-        check_cancel()
-        if strategy_state.get('span_only'):
-            return run_spans(group, history)
-        pieces = [piece for plan in group for piece in plan.pieces]
-        try:
-            # Keep the complete cue in one model input, including its original
-            # controls: typography must not turn words or counters into isolated
-            # fragments. Accept only the exact original control sequence.
-            native = [Piece(plan.cue.restore(plan.cue.text)) for plan in group]
-            values = request(native, history, group[0].cue.id + 1, group[-1].cue.id + 1,
-                             preserve_controls=True) if pieces else {id(p): p.source for p in native}
-            translated = {}
-            for plan, piece in zip(group, native):
-                masked, controls = protect(values[id(piece)])
-                if controls != plan.cue.protected:
-                    raise AlignmentError(f'대사 {plan.cue.id + 1}: ASS 태그·줄바꿈 불일치 '
-                                         f'(원문 {len(plan.cue.protected)}개 / 응답 {len(controls)}개). 개수·순서·내용을 확인합니다.')
-                plan.cue.restore(masked)
-                translated[str(plan.cue.id)] = masked
-        except (OutputLimitError, ValueError) as exc:
-            # Do not spend a whole run repeatedly generating/rejecting long ASS
-            # controls. Once a tagged native request fails, use the existing
-            # bounded span path for this work's remaining requests and files.
-            if any(plan.cue.protected for plan in group) and not isinstance(exc, PromptError):
-                strategy_state['span_only'] = True
-                progress(phase='retry', message=str(exc).splitlines()[0] +
-                         ' · 태그 포함 문장 요청을 이번 작품 실행에서 중단하고 보호 구간별 번역으로 전환합니다')
-                return run_spans(group, history)
-            if len(group) > 1:
-                split_reason(exc, len(group))
-                mid = len(group) // 2
-                history = run(group[:mid], history)
-                return run(group[mid:], history)
-            # Keep the complete cue atomic even when its style-separated parts
-            # need smaller requests. A one-piece failure is not retried unchanged.
-            if not pieces or (not isinstance(exc, PromptError) and len(pieces) == 1
-                              and group[0].cue.restore(group[0].cue.text).strip() == pieces[0].source):
-                raise
-            progress(phase='retry', message=str(exc).splitlines()[0] + ' · 보호 구간별 번역으로 전환합니다')
-            values = translate_pieces(pieces, history, group[0].cue.id + 1)
-            translated = {str(group[0].cue.id): group[0].render(values)}
-        # Persistence/encoding failures are deliberately outside the recovery try.
-        return accept(group, translated, history)
-
-    return run(plans, pairs)
+    if len(layouts) == 1:
+        return individual(layouts[0], pairs)
+    try:
+        values = request([plan.source for plan in layouts], pairs, cues[0].id + 1, cues[-1].id + 1)
+    except (AlignmentError, OutputLimitError, PromptError) as exc:
+        progress(phase='retry', message=str(exc).splitlines()[0] +
+                 ' · 이 묶음만 대사별 문장 전체로 처리합니다 (반복 반분·태그 구간 분할 없음)')
+        history = pairs
+        for plan in layouts:
+            history = individual(plan, history)
+        return history
+    return accept(layouts, values, pairs)

@@ -19,60 +19,67 @@ def source(prompt):
 
 
 class SentenceUnitTests(unittest.TestCase):
-    def test_typography_does_not_create_isolated_suffix_or_counter_requests(self):
+    def test_typography_never_creates_isolated_suffix_or_counter_requests(self):
         raw = ass([r'{\pos(50,80)}ネコ{\fscx50}たち{\fscx100}が来た！',
                    r'{\pos(50,120)}３{\fscx100}台ある。'])
-        answer = '\n'.join([r'{\pos(50,80)}고양이{\fscx50}들{\fscx100}이 왔다!',
-                            r'{\pos(50,120)}차가 ３{\fscx100}대 있다.'])
         class Model:
-            calls = []
+            def __init__(self): self.calls = []
             def complete_text(self, prompt, limit):
-                self.calls.append(source(prompt)); return answer
+                self.calls.append(source(prompt)); return '고양이들이 왔다!\n차가 ３대 있다.'
         with tempfile.TemporaryDirectory() as folder:
             model = Model(); output, _ = Engine(Path(folder)).translate(config(), [('sample.ass', raw)], client=model)
-            self.assertEqual(len(model.calls), 1)
-            self.assertEqual(model.calls[0].splitlines(), [c.restore(c.text) for c in AssDocument(raw).cues])
-            self.assertNotIn('たち', model.calls[0].splitlines())
+            self.assertEqual(model.calls, ['ネコたちが来た！\n３台ある。'])
             before, after = AssDocument(raw), AssDocument(output[0][1])
             for a, b in zip(before.cues, after.cues):
                 self.assertEqual(a.prefix, b.prefix); self.assertEqual(a.protected, b.protected)
-            self.assertIn('고양이', output[0][1].decode('utf-8-sig'))
+            self.assertEqual([TOKEN.sub('', c.text) for c in after.cues], ['고양이들이 왔다!', '차가 ３대 있다.'])
 
-    def test_changed_native_controls_are_rejected_before_safe_span_fallback(self):
+    def test_model_never_receives_layout_and_cannot_inject_new_controls(self):
         raw = ass([r'{\pos(50,80)}ネコ{\fscx50}たち'])
         class Model:
             def __init__(self): self.calls = []
             def complete_text(self, prompt, limit):
                 text = source(prompt); self.calls.append(text)
-                if '{' in text: return r'{\pos(999,999)}고양이들'
-                return '고양이\n들'
+                return r'{\pos(999,999)}고양이들'
         with tempfile.TemporaryDirectory() as folder:
-            model = Model(); updates = []
-            output, _ = Engine(Path(folder)).translate(config(), [('sample.ass', raw)], client=model,
-                                                       progress=lambda **d: updates.append(d))
-            self.assertEqual(len(model.calls), 2)
-            result = output[0][1].decode('utf-8-sig')
-            self.assertNotIn('999', result); self.assertIn(r'{\pos(50,80)}고양이{\fscx50}들', result)
-            self.assertTrue(any('구간별' in d.get('message', '') for d in updates))
+            model = Model()
+            with self.assertRaises(ValueError):
+                Engine(Path(folder)).translate(config(), [('sample.ass', raw)], client=model)
+            self.assertEqual(model.calls, ['ネコたち'])
+            self.assertFalse(list(Path(folder).rglob('*.json')))
 
-    def test_failed_tagged_native_request_is_not_repeated_across_batches_and_files(self):
-        raw = ass([r'{\pos(50,80)}' + word + r'{\fscx50}たち' for word in ('猫', '犬', '鳥', '牛', '馬')])
+    def test_one_bad_batch_uses_complete_individual_cues_then_batching_recovers(self):
+        # Regression: 12 cues formerly became 21 spans and 12 -> 6 -> 3 -> 1
+        # requests. Here each cue is exactly one source row at every size.
+        raw = ass([r'{\pos(50,80)}' + str(i) + r'猫{\fscx50}たち{\fscx100}が来た！' for i in range(24)])
         class Model:
-            def __init__(self, reject): self.calls = []; self.reject = reject
+            def __init__(self): self.calls = []
             def complete_text(self, prompt, limit):
                 text = source(prompt); self.calls.append(text)
-                return text.replace(r'\pos(50,80)', r'\pos(999,999)') if self.reject and '{' in text else text
-        for reject in (True, False):
-            with self.subTest(reject=reject), tempfile.TemporaryDirectory() as folder:
-                cfg = dict(config(), batch_size=2); model = Model(reject); engine = Engine(Path(folder))
-                files = [('first.ass', raw), ('second.ass', raw)]
-                outputs, _ = engine.translate(cfg, files, client=model)
-                native = [text for text in model.calls if '{' in text]
-                self.assertEqual(len(native), 1 if reject else 6)
-                self.assertTrue(all(result == raw for _, result in outputs))
-                count = len(model.calls)
-                engine.translate(cfg, files, client=model)
-                self.assertEqual(len(model.calls), count)
+                if len(self.calls) == 1: return '\n'.join(text.splitlines()[:-1])
+                return text
+        with tempfile.TemporaryDirectory() as folder:
+            model = Model(); updates = []; engine = Engine(Path(folder))
+            output, _ = engine.translate(config(), [('first.ass', raw)], client=model,
+                                         progress=lambda **d: updates.append(d))
+            self.assertEqual([len(t.splitlines()) for t in model.calls], [12] + [1] * 12 + [12])
+            self.assertTrue(all('たちが来た！' in t and '{' not in t for t in model.calls))
+            self.assertEqual(output[0][1], raw)
+            self.assertEqual([d['done'] for d in updates if d.get('phase') == 'validated'], list(range(1, 13)) + [24])
+            self.assertTrue(any('이 묶음만' in d.get('message', '') for d in updates))
+            engine.translate(config(), [('first.ass', raw)], client=model)
+            self.assertEqual(len(model.calls), 14)
+
+    def test_single_cue_multiline_response_is_not_split_or_retried(self):
+        raw = ass([r'{\i1}ネコ{\fscx50}たち{\i0}が来た！'])
+        class Model:
+            calls = []
+            def complete_text(self, prompt, limit):
+                self.calls.append(source(prompt)); return '고양이들이\n왔어!'
+        with tempfile.TemporaryDirectory() as folder:
+            model = Model(); output, _ = Engine(Path(folder)).translate(config(), [('sample.ass', raw)], client=model)
+            self.assertEqual(model.calls, ['ネコたちが来た！'])
+            self.assertEqual(TOKEN.sub('', AssDocument(output[0][1]).cues[0].text), '고양이들이 왔어!')
 
     def test_readings_opt_in_comments_original_rows_and_preserves_encoding_and_controls(self):
         raw = ass([r'{\pos(80,42)\fscx50\fscy50}ねこ', r'{\pos(40,96)}猫が来た。',

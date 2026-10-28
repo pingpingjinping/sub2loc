@@ -69,7 +69,7 @@ class TranslationModeTests(unittest.TestCase):
             for prompt in translator.prompts:
                 source = prompt.split('<start_of_turn>user\n')[1].split('<end_of_turn>')[0]
                 self.assertNotIn('⟪S2L:', source); self.assertNotIn('translations', source)
-                self.assertIn('{', source); self.assertIn(r'\N', source)
+                self.assertNotIn('{', source); self.assertNotIn(r'\N', source)
             result = output[0][1].decode()
             self.assertIn(r'{\i1}좋은 아침, 미사키.{\i0}', result)
             self.assertIn(r'아키라 군, 좋은 아침.\N오늘은 일찍 왔네.', result)
@@ -95,7 +95,7 @@ class TranslationModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             translator = Broken()
             with self.assertRaises(ValueError): Engine(Path(folder)).translate(config(), [('01.ass', SAMPLE)], client=translator)
-            self.assertEqual(len(translator.prompts), 3)
+            self.assertEqual(len(translator.prompts), 2)
             self.assertFalse(list(Path(folder).rglob('*.json')))
 
 

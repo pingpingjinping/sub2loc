@@ -40,7 +40,7 @@ class OutputLimitTests(unittest.TestCase):
             engine = Engine(Path(folder)); limited = Limited(); cfg = config(); cfg['batch_size'] = 1
             with self.assertRaises(OutputLimitError) as caught:
                 engine.translate(cfg, [('episode.ass', SAMPLE)], client=limited)
-            self.assertEqual(len(limited.prompts), 4)  # A smaller changed request after the two-span failure.
+            self.assertEqual(len(limited.prompts), 2)  # One request per complete cue; no tag-span retries.
             self.assertEqual(caught.exception.filename, 'episode.ass')
             self.assertEqual(caught.exception.first, 2)
             self.assertIn('アキラ', str(caught.exception))
@@ -119,7 +119,7 @@ class OutputLimitUiTests(unittest.TestCase):
                 while window.worker is not None:
                     if time.monotonic() > deadline: self.fail('Error UI timed out')
                     QTest.qWait(10)
-                self.assertEqual(len(requests), 2)
+                self.assertEqual(len(requests), 1)
                 details = window.probe_result.toPlainText()
                 self.assertIn('my-episode.ass', details)
                 self.assertIn('おはよう、ミサキ。', details)
