@@ -160,6 +160,7 @@ def write_result(path, raw):
 
 def validate_settings(settings):
     config = dict(settings)
+    if type(config.get('use_summary',False)) is not bool:raise ValueError('누적 문맥 요약 설정을 확인하세요.')
     output_format(config)
     if type(config.get('strip_ass_decoration',False)) is not bool:
         raise ValueError('ASS 색상·강조 제거 설정이 올바르지 않습니다.')

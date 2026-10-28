@@ -19,7 +19,7 @@ class ThroughputETA:
 
     def update(self, phase, done, total):
         now = self.clock()
-        if phase == 'request' and self.request_started is None:
+        if phase in ('request','summary_request') and self.request_started is None:
             self.request_started, self.request_done = now, done
         if phase == 'validated' and self.request_started is not None and done > self.request_done:
             duration = max(0.0, now - self.request_started)

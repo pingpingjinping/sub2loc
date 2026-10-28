@@ -385,6 +385,8 @@ class MainWindow(QMainWindow):
         for title,value in [('OFF', 'none'),('서버 기본값 · OFF 미지정', 'server'),('Low','low'),('Medium','medium'),('High','high')]: self.thinking.addItem(title,value)
         self.thinking.setToolTip('서버 기본값은 OFF 지시를 보내지 않습니다. 웹 채팅의 OFF가 외부 API와 공유되지 않을 수 있으므로 끄려면 OFF를 직접 선택하세요.')
         self.streaming = QCheckBox('스트리밍 응답 받기')
+        self.use_summary = QCheckBox('이전 대사 누적 요약 사용')
+        self.use_summary.setToolTip('ID 기반 모드에서 완료된 앞 대사를 짧게 누적 요약해 다음 묶음에 전달합니다. 추가 API 요청과 시간이 필요하며 요약도 틀릴 수 있습니다. 요약 실패 시 본 번역은 계속합니다.')
         self.input_tokens = QSpinBox(); self.input_tokens.setRange(256,131072); self.input_tokens.setValue(20000); self.input_tokens.setSingleStep(1024)
         self.quality_retries = QSpinBox(); self.quality_retries.setRange(0,3); self.quality_retries.setValue(2)
         self.prompt_template = QPlainTextEdit(DEFAULT_TEMPLATE); self.prompt_template.setMinimumHeight(150)
@@ -393,6 +395,7 @@ class MainWindow(QMainWindow):
             form.addRow(text, widget)
         api_layout.addLayout(form)
         self.format_hint = label('', 'muted'); api_layout.addWidget(self.format_hint)
+        api_layout.addWidget(self.use_summary)
         api_layout.addWidget(label('벌룬 TXT: 원문 내보내기 파일을 추가하세요. ID 기반 모드에서 페이지·말풍선 번호를 보존한 TXT로 저장합니다. OCR 의심 문자는 경고만 하며 이미지 확인을 대신하지 않습니다.', 'muted'))
         self.strip_ass_decoration = QCheckBox('ASS 대사 내 색상·강조 태그 제거 (위치·크기 유지)')
         self.strip_ass_decoration.setToolTip('색상 \\c·\\1c–\\4c와 굵게 \\b·기울임 \\i·밑줄 \\u·취소선 \\s만 제거합니다. Style 정의의 기본 색상·서식, 위치·크기·너비·투명도·줄바꿈은 유지합니다. 켜면 기존 ASS 저장분과 별도로 번역합니다.')
@@ -473,6 +476,7 @@ class MainWindow(QMainWindow):
         self.provider.setCurrentIndex(max(0,self.provider.findData(s.get('provider','openai'))))
         self.thinking.setCurrentIndex(max(0,self.thinking.findData(s.get('thinking','none'))))
         self.streaming.setChecked(s.get('stream') is True)
+        self.use_summary.setChecked(s.get('use_summary',True) is True)
         self.temperature.setValue(s.get('temperature',0.1 if s.get('api_mode')=='ja-ko-vn' or 'ja-ko-vn' in s.get('model','') else 0.2))
         self.input_tokens.setValue(s.get('input_tokens',20000)); self.quality_retries.setValue(s.get('quality_retries',2))
         self.prompt_template.setPlainText(s.get('prompt_template',DEFAULT_TEMPLATE))
@@ -489,7 +493,7 @@ class MainWindow(QMainWindow):
 
     def settings(self):
         return dict(output_format=self.output_format.currentData(),strip_ass_decoration=self.strip_ass_decoration.isChecked(),provider=self.provider.currentData(),temperature=self.temperature.value(),thinking=self.thinking.currentData(),
-                    stream=self.streaming.isChecked(),input_tokens=self.input_tokens.value(),quality_retries=self.quality_retries.value(),
+                    use_summary=self.use_summary.isChecked(),stream=self.streaming.isChecked(),input_tokens=self.input_tokens.value(),quality_retries=self.quality_retries.value(),
                     prompt_template=self.prompt_template.toPlainText(),allowed_foreign=self.allowed_foreign.toPlainText(),
                     url=self.url.text().strip(), model=self.model.currentText().strip(), key=self.key.text(),
                     api_mode=self.api_mode.currentData(), context_tokens=self.context_tokens.value(), hide_readings=self.hide_readings.isChecked(),
@@ -673,6 +677,7 @@ class MainWindow(QMainWindow):
             if not plain and self.strip_ass_decoration.isChecked():
                 self.format_hint.setText('ASS 색상·강조 제거: 대사 내 지정 태그만 제거합니다. 위치·크기·너비·줄바꿈과 Style 정의는 유지하며, 기존 ASS 저장분과 별도로 번역합니다.')
             mode = mode_for(self.settings())
+            self.use_summary.setEnabled(mode=='identified')
             self.thinking.setEnabled(mode=='identified' and self.provider.currentData()=='polystrata')
             for control in (self.streaming,self.input_tokens,self.quality_retries,self.prompt_template,self.allowed_foreign): control.setEnabled(mode=='identified')
             if mode == 'identified':
@@ -787,7 +792,7 @@ class MainWindow(QMainWindow):
             self.wait_message = f"{data.get('work', '')} · {data['message']}"
             self.status.setText(self.wait_message)
             if data.get('phase') != 'stream': self.log_run_event(self.wait_message)
-        if data.get('phase') in ('request', 'retry'):
+        if data.get('phase') in ('request', 'retry', 'summary_request'):
             self.request_started = time.monotonic(); self.wait_timer.start()
             self.show_wait_time()
         elif data.get('phase') in ('validated','review','stream','saving'):

@@ -199,6 +199,8 @@ class DesktopTests(unittest.TestCase):
 
     def test_output_format_choice_persists_and_is_locked_during_translation(self):
         self.assertEqual(self.window.settings()['output_format'], 'ass')
+        self.assertTrue(self.window.settings()['use_summary'])
+        self.window.use_summary.setChecked(False)
         self.window.strip_ass_decoration.setChecked(True)
         self.window.output_format.setCurrentIndex(self.window.output_format.findData('smi'))
         self.assertFalse(self.window.strip_ass_decoration.isEnabled())
@@ -209,6 +211,7 @@ class DesktopTests(unittest.TestCase):
         restored = MainWindow(self.root / 'appdata')
         try:
             self.assertEqual(restored.settings()['output_format'], 'smi')
+            self.assertFalse(restored.settings()['use_summary'])
             self.assertTrue(restored.settings()['strip_ass_decoration'])
             restored.output_format.setCurrentIndex(restored.output_format.findData('ass'))
             self.assertTrue(restored.strip_ass_decoration.isEnabled())
