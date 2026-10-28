@@ -23,7 +23,9 @@ def main():
         distribution = metadata.distribution(name)
         folder = target / 'licenses' / name
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / 'METADATA.txt').write_text(str(distribution.metadata), encoding='utf-8')
+        # Copy the original metadata verbatim: serializing email-style metadata can
+        # reject multiline Description headers on patched Python 3.12 releases.
+        (folder / 'METADATA.txt').write_text(distribution.read_text('METADATA') or name, encoding='utf-8')
         for item in distribution.files or []:
             if any(part.lower() in ('licenses', 'license', 'copying.txt') for part in item.parts):
                 source = Path(distribution.locate_file(item))
