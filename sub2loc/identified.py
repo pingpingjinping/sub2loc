@@ -61,8 +61,24 @@ def response_items(raw):
         fence = re.match(r'```(?:jsonl?|ndjson)?[ \t]*(?:\r?\n|$)',raw[pos:],re.IGNORECASE)
         if fence:
             pos += fence.end(); continue
+        if items and raw[pos:pos+1]==',':
+            pos += 1; continue  # Complete explicit-ID objects separated by commas.
         try: item, pos = decoder.raw_decode(raw,pos)
-        except ValueError: break
+        except ValueError:
+            # A truncated top-level array may still contain complete records.
+            # Walk its values, never search inside an unfinished string/object.
+            if raw[pos:pos+1]=='[':
+                cursor=pos+1; complete=[]
+                while cursor<len(raw):
+                    while cursor<len(raw) and raw[cursor].isspace(): cursor+=1
+                    try: value,cursor=decoder.raw_decode(raw,cursor)
+                    except ValueError: break
+                    complete.append(value)
+                    while cursor<len(raw) and raw[cursor].isspace(): cursor+=1
+                    if raw[cursor:cursor+1]!=',': break
+                    cursor+=1
+                if complete: items.append(complete)
+            break
         items.append(item)
     if not items:
         # Preserve support for complete one-line records around plain prose.
@@ -96,11 +112,11 @@ class ResponseFormatError(ValueError):
     """A run-wide protocol failure with bounded, copyable diagnostic data."""
     def __init__(self,diagnostic,path):
         self.diagnostic = diagnostic; self.path = path
-        super().__init__('응답에서 유효한 ID·번역문을 하나도 읽지 못해 자동 재요청을 중단했습니다.')
+        super().__init__(diagnostic.get('reason','응답에서 유효한 ID·번역문을 하나도 읽지 못해 자동 재요청을 중단했습니다.'))
 
     def __str__(self):
         d = self.diagnostic
-        return ('응답에서 유효한 ID·번역문을 하나도 읽지 못해 자동 재요청을 중단했습니다.\n'
+        return (d.get('reason','응답에서 유효한 ID·번역문을 하나도 읽지 못해 자동 재요청을 중단했습니다.')+'\n'
                 f"파일: {d['file']} / 대사: {d['first']}–{d['last']}\n"
                 f"종료 사유: {d['finish_reason']} / 응답 {d['response_characters']}자 / 생각 채널 {d['reasoning_characters']}자 / 완성 JSON {d['parsed_values']}개\n"
                 f"일치 ID {d['matched_ids']}개 / 정상 ID·문자열 {d['usable_rows']}개 / 중복 ID {d['duplicate_ids']}개 / 미등록 ID {d['unknown_ids']}개\n"
@@ -170,7 +186,11 @@ def _run(folder, run_id, config, files, cancel, progress, client):
         if rate is not None: last_metrics.update(tokens_per_second=rate, speed_kind=rate_kind)
         if now - last_tick[0] >= 0.25:
             last_tick[0] = now
-            emit('stream', f"스트리밍 수신 · {data.get('characters', 0)}자")
+            reasoning = data.get('reasoning_characters',0)
+            if reasoning and not data.get('characters'):
+                emit('stream',f'생각 채널 수신 · {reasoning}자 (번역 본문 0자)')
+            else:
+                emit('stream', f"스트리밍 수신 · {data.get('characters', 0)}자")
     def messages(targets, cues, ids, issues=None):
         selected = {c.id for c in targets}
         # Only nearby source rows and a bounded window of accepted translations.
@@ -224,6 +244,7 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                 return client.chat(msg, max_tokens=output_limit, temperature=config.get('temperature',0.7),
                                    stream=config.get('stream',False),
                                    reasoning_effort=config.get('thinking','none') if config.get('provider')=='polystrata' and config.get('thinking')!='server' else None,
+                                   thinking_enabled=False if config.get('provider')=='polystrata' and config.get('thinking','none')=='none' else None,
                                    check_cancel=check, on_event=observe)
             except StreamInterrupted as exc:
                 return exc.partial
@@ -235,6 +256,10 @@ def _run(folder, run_id, config, files, cancel, progress, client):
             emit('retry','일시적 API 실패 · 현재 미완료 ID만 재시도')
             if cancel.wait(0.5 * (attempt+1)): check()
         raise AssertionError('unreachable')
+    controls = ('OFF · reasoning_effort=none · enable_thinking=false'
+                if config.get('thinking','none')=='none' else '서버 기본값 · OFF 지시 미전송' if config.get('thinking')=='server' else config.get('thinking','서버 기본값'))
+    if config.get('provider')!='polystrata': controls = '일반 호환 제공자 · Thinking 제어 미전송'
+    emit('preflight','요청 설정: '+controls)
     emit('preflight','ASS 구조 및 저장된 ID를 확인했습니다')
     outputs = []
     for (name, raw), doc in zip(files,documents):
@@ -265,7 +290,7 @@ def _run(folder, run_id, config, files, cancel, progress, client):
             expected = {ids[c.id] for c in group}
             found, duplicates, unknown = parse_rows(response.content,expected)
             usable = sum(isinstance(v,str) and bool(v.strip()) for v in found.values())
-            if not usable:
+            def format_failure(reason):
                 key = getattr(client,'key','') or config.get('key','')
                 types = {}
                 items = response_items(response.content)
@@ -274,7 +299,7 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                         if isinstance(row,dict):
                             kind = type(row.get('id')).__name__
                             types[kind] = types.get(kind,0)+1
-                diagnostic = dict(file=safe_preview(name,key,240),first=group[0].id+1,last=group[-1].id+1,
+                diagnostic = dict(reason=reason,file=safe_preview(name,key,240),first=group[0].id+1,last=group[-1].id+1,
                      finish_reason=safe_preview(response.finish_reason,key,80) or '(없음/중단)',
                      response_characters=len(response.content),reasoning_characters=response.reasoning_characters,parsed_values=len(items),matched_ids=len(found),
                      usable_rows=usable,duplicate_ids=len(duplicates),unknown_ids=len(unknown),observed_id_types=types,
@@ -282,12 +307,15 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                      usage={k:v for k,v in response.usage.items() if k in ('prompt_tokens','completion_tokens','total_tokens') and type(v) is int},
                      max_tokens=output_limit,requests=requests,
                      response_preview=safe_preview(response.content,key,2400))
-                errors.update((name,c.id) for c in group)
+                errors.update((name,c.id) for c in group if str(c.id) not in saved)
                 checkpoint()
                 path = folder/'diagnostics'/'last-response.json'
                 atomic_json(path,diagnostic)
-                emit('review',f'응답 전체 ID/형식 인식 실패: {len(group)}대사 · 자동 재요청 중단 · 번역 API 탭에서 응답 미리보기를 확인하세요')
-                raise ResponseFormatError(diagnostic,path)
+                emit('review',reason+' · 번역 API 탭에서 응답 미리보기를 확인하세요')
+                return ResponseFormatError(diagnostic,path)
+            if not usable:
+                raise format_failure('응답에서 유효한 ID·번역문을 하나도 읽지 못해 자동 재요청을 중단했습니다.')
+            low_yield = len(group)>=5 and usable*5<=len(group) and response.finish_reason=='stop'
             if unknown: emit('review',f'요청에 없는 ID {len(unknown)}개를 제외했습니다')
             repeated = {}
             for key,value in found.items():
@@ -323,8 +351,8 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                 reasons[cue.id] = issues_for_cue
                 if issues_for_cue:
                     errors.add((name,cue.id))
-                    emit('review',f'대사 {cue.id+1}: '+', '.join(issues_for_cue))
-                    if attempts[cue.id] <= max_repairs: continue
+                    if not low_yield: emit('review',f'대사 {cue.id+1}: '+', '.join(issues_for_cue))
+                    if low_yield or attempts[cue.id] <= max_repairs: continue
                     if cue.id not in candidates:
                         checkpoint()
                         raise ValueError(f"{name}: 대사 {cue.id+1}의 ID/ASS 구조를 {max_repairs}회 재번역 후에도 복구하지 못했습니다 ({', '.join(issues_for_cue)}). 정상 ID는 저장했습니다.")
@@ -337,6 +365,8 @@ def _run(folder, run_id, config, files, cancel, progress, client):
                 state['pairs'].append(dict(source=_bound(TOKEN.sub('',cue.text),300),target=_bound(TOKEN.sub('',saved[str(cue.id)]),400),speaker=cue.speaker))
             state['pairs'] = state['pairs'][-12:]
             checkpoint(); emit('validated',f'{done()} / {total} 대사 검증·저장 완료')
+            if low_yield:
+                raise format_failure(f'{len(group)}개 요청 중 ID·번역문을 {usable}개만 인식해 대량 재요청을 중단했습니다. 검증된 대사는 저장했습니다.')
             if response.finish_reason=='length':
                 ceiling = max(1,min(ceiling,int(max(1,len(found))*0.8)))
                 emit('retry','출력 한도 도달 · 완성된 정상 ID는 유지하고 남은 요청의 출력 예산을 조정합니다')

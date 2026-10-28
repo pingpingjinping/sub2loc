@@ -10,7 +10,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from sub2loc.api import Client, ChatResult, RequestError, StreamInterrupted
+from sub2loc.api import Client, ChatResult, RequestError, StreamInterrupted, ThinkingControlError
 from sub2loc.ass import AssDocument, TOKEN
 from sub2loc.engine import Engine, Cancelled
 from sub2loc.identified import parse_rows, project_lock, ResponseFormatError
@@ -86,6 +86,38 @@ class IdentifiedTests(unittest.TestCase):
             return ChatResult(reply([answer(r) for r in d['translate']]),'stop')
         model=Model(partial);self.run_model(ass(['猫','犬','鳥']),model)
         self.assertEqual([len(c[0]['translate']) for c in model.calls],[3,1])
+
+    def test_comma_separated_complete_id_objects_are_not_lost_after_first(self):
+        def comma(m,d,k):return ChatResult(',\n'.join(json.dumps(answer(r),indent=2) for r in d['translate']),'stop')
+        model=Model(comma);self.run_model(ass(['猫']*50),model)
+        self.assertEqual(len(model.calls),1)
+
+    def test_truncated_pretty_array_salvages_only_complete_elements(self):
+        raw='[\n'+json.dumps({'id':'a','text':'번역'},indent=2)+',\n{"id":"b", "text":'
+        found,_,_=parse_rows(raw,{'a','b'})
+        self.assertEqual(found,{'a':'번역'})
+
+    def test_one_of_50_ids_saves_one_and_stops_before_49_re_request(self):
+        def low(m,d,k):return ChatResult(reply([answer(d['translate'][0])]),'stop')
+        for repairs in (0,2):
+            with self.subTest(repairs=repairs),tempfile.TemporaryDirectory() as root:
+                raw=ass(['猫']*50);model=Model(low);updates=[]
+                with self.assertRaises(ResponseFormatError) as caught:
+                    self.run_model(raw,model,config(quality_retries=repairs),root=root,updates=updates)
+                self.assertEqual(len(model.calls),1);self.assertIn('50개 요청',str(caught.exception))
+                self.assertEqual(updates[-1]['done'],1);self.assertEqual(updates[-1]['errors'],49)
+                self.assertLess(len([d for d in updates if d.get('phase')=='review']),5)
+                recovered=Model();self.run_model(raw,recovered,config(quality_retries=repairs),root=root)
+                self.assertEqual(len(recovered.calls[0][0]['translate']),49)
+                self.assertFalse(any(r['id'].startswith('e000001-') for r in recovered.calls[0][0]['translate']))
+
+    def test_low_id_yield_due_to_known_output_limit_still_recovers_missing_ids(self):
+        def limited(m,d,k):
+            rows=d['translate'][:1] if len(m.calls)==1 else d['translate']
+            return ChatResult(reply([answer(r) for r in rows]),'length' if len(m.calls)==1 else 'stop')
+        model=Model(limited);self.run_model(ass(['猫']*10),model)
+        original=model.calls[0][0]['translate'][0]['id']
+        self.assertTrue(all(r['id']!=original for c in model.calls[1:] for r in c[0]['translate']))
 
     def test_whole_response_format_failure_stops_once_and_summarizes_instead_of_100_retries(self):
         def numbered(m,d,k): return ChatResult('\n'.join(f'{i+1:03} | 번역' for i in range(len(d['translate']))),'stop',{'completion_tokens':1200})
@@ -245,7 +277,7 @@ class IdentifiedTests(unittest.TestCase):
 
     def test_generic_identified_provider_never_sends_thinking_extension(self):
         model=Model(); self.run_model(ass(['猫']),model,config(provider='openai',model='other'))
-        self.assertIsNone(model.calls[0][1]['reasoning_effort'])
+        self.assertIsNone(model.calls[0][1]['reasoning_effort']);self.assertIsNone(model.calls[0][1]['thinking_enabled'])
 
     def test_server_context_error_adjusts_budget_and_auth_failure_is_not_retried(self):
         def overflow(m,d,k):
@@ -317,7 +349,7 @@ class IdentifiedTests(unittest.TestCase):
 
 class HttpTests(unittest.TestCase):
     def setUp(self):
-        self.seen=[]; self.structured=False; self.cut=False; owner=self
+        self.seen=[]; self.structured=False; self.cut=False; self.reasoning='비공개 생각'; owner=self
         class Server(BaseHTTPRequestHandler):
             def log_message(self,*args): pass
             def do_GET(self):
@@ -331,16 +363,19 @@ class HttpTests(unittest.TestCase):
                 content='정답'
                 if owner.structured:
                     rows=payload(d['messages'])['translate']
-                    selected=rows[1:] if len(owner.seen)==1 else rows
+                    selected=rows[1:] if len(owner.seen)==1 and len(rows)>1 else rows
                     content=reply([answer(r) for r in selected])
                 if not d['stream']:
                     self.wfile.write(json.dumps({'choices':[{'message':{'content':'정답'},'finish_reason':'stop'}],'usage':{'completion_tokens':2}}).encode());return
-                for obj in ({'choices':[{'delta':{'reasoning_content':'비공개 생각'}}]},
+                for obj in ({'choices':[{'delta':{'reasoning_content':owner.reasoning}}]},
                             {'choices':[{'delta':{'content':content}}]},
                             {'choices':[{'delta':{},'finish_reason':'stop'}],'usage':{'completion_tokens':2},'timings':{'predicted_per_second':88.5}}):
                     if owner.cut and obj.get('usage'): continue
-                    self.wfile.write(('data: '+json.dumps(obj,ensure_ascii=False)+'\r\n\r\n').encode());self.wfile.flush()
-                self.wfile.write(b'data: [DONE]\n\n')
+                    try:
+                        self.wfile.write(('data: '+json.dumps(obj,ensure_ascii=False)+'\r\n\r\n').encode());self.wfile.flush()
+                    except OSError:return
+                try:self.wfile.write(b'data: [DONE]\n\n')
+                except OSError:pass
         self.server=ThreadingHTTPServer(('127.0.0.1',0),Server)
         threading.Thread(target=self.server.serve_forever,daemon=True).start()
         self.addCleanup(self.server.server_close);self.addCleanup(self.server.shutdown)
@@ -356,6 +391,29 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.client.discover()['id'],'gemma')
         self.assertEqual(self.client.chat([],max_tokens=500,temperature=.7).content,'정답')
         self.assertNotIn('reasoning_effort',self.seen[0])
+
+    def test_polystrata_off_payload_explicitly_disables_template_thinking(self):
+        self.structured=True
+        with tempfile.TemporaryDirectory() as root:
+            Engine(Path(root)).translate(config(url=self.client.url),[('01.ass',ass(['猫']))])
+        self.assertEqual(self.seen[0]['reasoning_effort'],'none')
+        self.assertEqual(self.seen[0]['chat_template_kwargs'],{'enable_thinking':False})
+
+    def test_off_ignored_by_server_stops_stream_early_without_retry(self):
+        self.reasoning='장시간 생각을 생성합니다 '*30;self.structured=True
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(ThinkingControlError) as caught:
+                Engine(Path(root)).translate(config(url=self.client.url),[('01.ass',ass(['猫']))])
+            self.assertEqual(len(self.seen),1);self.assertFalse(caught.exception.retryable)
+            self.assertFalse(list(Path(root).glob('*/runs/*.json')))
+            self.assertNotIn(self.reasoning,str(caught.exception))
+
+    def test_server_default_and_generic_provider_do_not_force_thinking_controls(self):
+        self.reasoning='길게 생각하는 서버 기본값 '*30;self.structured=True
+        for override in (dict(thinking='server'),dict(provider='openai',model='other')):
+            with self.subTest(override=override),tempfile.TemporaryDirectory() as root:
+                Engine(Path(root)).translate(config(url=self.client.url,**override),[('01.ass',ass(['猫']))])
+                self.assertNotIn('reasoning_effort',self.seen[-1]);self.assertNotIn('chat_template_kwargs',self.seen[-1])
 
     def test_real_http_plain_response_stops_with_diagnostic_after_one_request(self):
         with tempfile.TemporaryDirectory() as root:

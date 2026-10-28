@@ -121,11 +121,13 @@ class Client:
 
 
     def chat(self, messages, *, max_tokens, temperature, stream=False,
-                   reasoning_effort=None, check_cancel=lambda: None, on_event=lambda **kw: None):
+                   reasoning_effort=None, thinking_enabled=None, check_cancel=lambda: None, on_event=lambda **kw: None):
         payload = dict(model=self.model, messages=messages, temperature=temperature,
                        max_tokens=max_tokens, stream=stream)
         if reasoning_effort is not None:
             payload['reasoning_effort'] = reasoning_effort
+        if thinking_enabled is not None:
+            payload['chat_template_kwargs'] = {'enable_thinking': thinking_enabled}
         headers = {'Content-Type': 'application/json', 'Accept': 'text/event-stream' if stream else 'application/json'}
         if self.key: headers['Authorization'] = 'Bearer ' + self.key
         req = request.Request(self.url + '/chat/completions', data=json.dumps(payload).encode(), headers=headers)
@@ -144,7 +146,9 @@ class Client:
             if isinstance(reasoning,str): result.reasoning_characters += len(reasoning)
             if choice.get('finish_reason'): result.finish_reason = choice['finish_reason']
             result.seconds = max(0.000001, time.monotonic() - started)
-            on_event(characters=len(result.content), usage=result.usage, timings=result.timings, seconds=result.seconds)
+            on_event(characters=len(result.content), reasoning_characters=result.reasoning_characters, usage=result.usage, timings=result.timings, seconds=result.seconds)
+            if stream and thinking_enabled is False and result.reasoning_characters >= 128:
+                raise ThinkingControlError(result.reasoning_characters)
         try:
             check_cancel()
             with self.opener.open(req, timeout=self.timeout) as response:
@@ -240,3 +244,13 @@ class RequestError(ApiError):
                          retryable=status in (408, 429) or status >= 500)
         self.status = status
         self.context_overflow = False
+
+
+class ThinkingControlError(ApiError):
+    def __init__(self,characters):
+        super().__init__(
+            'Thinking OFF 요청인데 서버가 생각 채널을 생성해 요청을 중단했습니다.\n'
+            f'관측한 생각 채널: {characters}자 (내용은 표시하지 않음).\n'
+            '전송한 OFF 설정: reasoning_effort=none, chat_template_kwargs.enable_thinking=false.\n'
+            'PolyStrata의 모델·서버 버전 및 Thinking 설정을 확인하세요. 같은 요청은 자동 재시도하지 않습니다.',
+            retryable=False)
