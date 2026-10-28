@@ -2,7 +2,6 @@
 from dataclasses import asdict, dataclass, field
 import json
 import math
-import time
 import os
 from pathlib import Path
 import re
@@ -12,6 +11,7 @@ from .subtitles import document_for, output_format
 from .api import base_url, OutputLimitError
 from .jako import mode_for
 from .engine import Engine, Cancelled, atomic_json, digest
+from .timing import ThroughputETA
 
 
 def natural_key(value):
@@ -225,7 +225,7 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
     engine, results = Engine(Path(root) / 'translations'), []
     queue_total = sum(len(document_for(raw,settings).cues) for _,_,source,_ in plans for _,raw in source)
     prior_done = 0; prior_metrics = dict(requests=0,retries=0,errors=0)
-    queue_started = time.monotonic(); queue_new_done = 0; last_done = 0
+    queue_eta = ThroughputETA()
     for work_index, (work, entries, source, targets) in enumerate(plans):
         if cancel.is_set():
             raise Cancelled('중단했습니다. 같은 목록·설정으로 다시 시작하면 이어서 처리합니다.')
@@ -241,19 +241,14 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
         mapping = {name: index for (name, _), (index, _) in zip(files, entries)}
         work_done = [0]; work_metrics = dict(requests=0,retries=0,errors=0)
         def report(**data):
-            nonlocal queue_new_done, last_done
             work_done[0] = data.get('done',work_done[0])
             data['global_done'] = prior_done + work_done[0]
             data['global_total'] = queue_total
-            if data.get('phase') == 'validated':
-                queue_new_done += max(0,data['global_done']-last_done)
-            last_done = data['global_done']
             for key in work_metrics:
                 if key in data:
                     work_metrics[key] = data[key]
                     data[key] += prior_metrics[key]
-            if queue_new_done:
-                data['eta_seconds'] = (time.monotonic()-queue_started)/queue_new_done*(queue_total-data['global_done'])
+            data.update(queue_eta.update(data.get('phase'),data['global_done'],queue_total))
             data.update(work=work.title, work_index=work_index + 1, work_total=len(plans))
             if 'file' in data:
                 data['index'] = mapping[data['file']]

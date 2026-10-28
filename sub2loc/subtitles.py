@@ -45,6 +45,31 @@ def srt_time(value):
     return f'{hours:02d}:{minutes:02d}:{seconds:02d},{ms:03d}'
 
 
+def subtitle_timeline(rows):
+    """Active prepared text at each boundary; intervals are [start, end)."""
+    events = defaultdict(lambda: ([], [])); values = {}
+    for identity, (start, end, text) in enumerate(rows):
+        if end <= start:
+            raise ValueError('종료 시간이 시작 시간보다 늦어야 합니다.')
+        values[identity] = text
+        events[start][0].append(identity)
+        events[end][1].append(identity)
+    active = set()
+    for at, (begin, finish) in sorted(events.items()):
+        active.difference_update(finish); active.update(begin)
+        yield at, tuple(values[i] for i in sorted(active))
+
+
+def render_srt(rows):
+    """Split overlaps into nonoverlapping spans, retaining active text in order."""
+    timeline = list(subtitle_timeline(rows))
+    blocks = []
+    for (start, lines), (end, _) in zip(timeline, timeline[1:]):
+        if lines:
+            blocks.append(f'{len(blocks)+1}\r\n{srt_time(start)} --> {srt_time(end)}\r\n' + '\r\n'.join(lines) + '\r\n\r\n')
+    return ''.join(blocks)
+
+
 @dataclass
 class PlainCue(Cue):
     plain = True
@@ -80,21 +105,14 @@ class PlainDocument:
             raise ValueError('번역 대사 수가 원문과 다릅니다.')
         values = {c.id: escape(c.restore(translations[str(c.id)]), quote=False) for c in self.cues}
         if self.format == 'srt':
-            result = ''.join(f'{i + 1}\r\n{srt_time(start)} --> {srt_time(end)}\r\n{values[c.id]}\r\n\r\n'
-                             for i, (c, (start, end)) in enumerate(zip(self.cues, self.times)))
+            result = render_srt((start, end, values[c.id]) for c, (start, end) in zip(self.cues, self.times))
         else:
-            # SAMI has start events, not per-caption end fields. Sweep the active
-            # set at starts AND ends so overlapping dialogue is never cleared early.
-            events = defaultdict(lambda: ([], []))
-            for cue, (start, end) in zip(self.cues, self.times):
-                events[start][0].append(cue.id)
-                events[end][1].append(cue.id)
-            active = set(); blocks = []
-            if events and min(events) > 0:
+            timeline = list(subtitle_timeline((start, end, values[c.id]) for c, (start, end) in zip(self.cues, self.times)))
+            blocks = []
+            if timeline and timeline[0][0] > 0:
                 blocks.append('<SYNC Start=0><P Class=SUBCC>&nbsp;</P></SYNC>')
-            for at, (begin, finish) in sorted(events.items()):
-                active.difference_update(finish); active.update(begin)
-                text = '<BR>'.join(values[i] for i in sorted(active)) if active else '&nbsp;'
+            for at, lines in timeline:
+                text = '<BR>'.join(lines) if lines else '&nbsp;'
                 blocks.append(f'<SYNC Start={at}><P Class=SUBCC>{text}</P></SYNC>')
             language = 'ko-KR' if self.target in ('한국어', '한글', 'ko', 'ko-kr', 'korean', '한국말') else 'und'
             result = ('<SAMI>\r\n<HEAD>\r\n<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=utf-8">\r\n'

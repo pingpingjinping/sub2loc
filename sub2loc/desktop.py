@@ -805,7 +805,7 @@ class MainWindow(QMainWindow):
             f"{completed}/{total} 대사 · {100*completed/total if total else 0:.1f}% · "
             f"현재 {d.get('first','–')}–{d.get('last','–')} · {d.get('stage','준비')} · "
             + (f"{rate:.1f} tok/s ({d.get('speed_kind','측정')}) · " if rate is not None else 'tok/s 대기 · ')
-            + ('ETA 추정 '+format_duration(eta) if eta is not None else 'ETA 추정 대기')
+            + ('ETA 추정 '+format_duration(eta) if eta is not None else 'ETA 재계산 대기' if d.get('eta_overdue') else 'ETA 추정 대기')
             + f" · 요청 {d.get('requests',0)} / 재시도 {d.get('retries',0)} / 오류 자막 {d.get('errors',0)}")
 
     def show_wait_time(self):

@@ -14,6 +14,19 @@ class CueFrame:
     @property
     def tokens(self): return [f'⟪S2L:{i}⟫' for i in range(len(self.original))]
 
+    def repair_trailing_token(self,text):
+        """Drop only one nonexistent next token appended after a complete row.
+
+        All expected tokens must already occur exactly once in order. Never
+        repair a missing/reordered/duplicated token, an internal extra marker,
+        multiple extras or a guessed index. restore() remains strict.
+        """
+        extra=f'⟪S2L:{len(self.original)}⟫'
+        if text.endswith(extra) and TOKEN.findall(text)==self.tokens+[extra]:
+            value=text[:-len(extra)]
+            if TOKEN.sub('',value).strip():return value,True
+        return text,False
+
     def restore(self,text):
         if TOKEN.findall(text)!=self.tokens:
             raise ValueError('ASS 내부 보호 토큰의 누락·중복·순서 변경')

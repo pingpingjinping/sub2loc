@@ -40,8 +40,8 @@ class SubtitleFormatTests(unittest.TestCase):
         result = doc.render({'0': '첫 대사', '1': '두 번째'})
         self.assertTrue(result.startswith(b'\xef\xbb\xbf'))
         self.assertEqual(result.decode('utf-8-sig'),
-                         '1\r\n01:02:03,450 --> 01:02:04,560\r\n첫 대사\r\n\r\n'
-                         '2\r\n00:00:00,120 --> 00:00:00,340\r\n두 번째\r\n\r\n')
+                         '1\r\n00:00:00,120 --> 00:00:00,340\r\n두 번째\r\n\r\n'
+                         '2\r\n01:02:03,450 --> 01:02:04,560\r\n첫 대사\r\n\r\n')
 
     def test_time_fields_use_ass_format_names_not_fixed_column_numbers(self):
         raw = ('[Events]\nFormat: Name, End, Style, Start, Text\n'
@@ -95,7 +95,7 @@ class SubtitleFormatTests(unittest.TestCase):
                 [('01.ass', ass([r'{\pos(10,20)}前\N後', r'別{\i1}台詞{\i0}']))], client=model)
             self.assertEqual(outputs[0][0], '01.translated.srt')
             blocks=outputs[0][1].decode('utf-8-sig').split('\r\n\r\n')
-            self.assertTrue(blocks[0].endswith('앞 뒤'));self.assertTrue(blocks[1].endswith('다른 대사'))
+            self.assertTrue(blocks[0].endswith('앞 뒤\r\n다른 대사'))
 
     def test_only_a_bad_plain_id_is_retried_with_neighbors(self):
         def result(model, data, kwargs):
