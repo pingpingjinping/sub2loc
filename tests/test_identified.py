@@ -59,6 +59,14 @@ class IdentifiedTests(unittest.TestCase):
         values,duplicates,_=parse_rows(reply([{'id':'a','text':'하나'},{'id':'a','text':'다른 것'}]),{'a'})
         self.assertFalse(values);self.assertEqual(duplicates,{'a'})
 
+    def test_repair_issues_do_not_repeat_other_pending_ids(self):
+        def limited(m,d,k):
+            if len(m.calls)==1:return ChatResult('','length')
+            return ChatResult(reply([answer(r) for r in d['translate']]),'stop')
+        model=Model(limited);self.run_model(ass(['猫','犬']),model)
+        for data,_,_ in model.calls[1:]:
+            self.assertEqual(set(data['repair_issues']),{r['id'] for r in data['translate']})
+
     def test_reordered_output_maps_by_id_and_preserves_every_ass_field(self):
         raw=ass([r'{\i1}一行\N二行\h次{\i0}',r'{\pos(10,20)}看板',r'{\p1}m 0 0 l 2 3{\p0}'])
         def reverse(m,d,k):

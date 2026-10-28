@@ -114,7 +114,7 @@ def _run(folder, run_id, config, files, cancel, progress, client):
     def emit(phase, message='', **extra):
         elapsed = time.monotonic() - started
         progress(**dict(current, phase=phase, stage={'request':'재번역' if extra.get('repair') else '번역',
-                 'review':'검수','validated':'검수','saving':'저장'}.get(phase, phase),
+                 'review':'검수','validated':'검수','saving':'저장','stream':current.get('operation','번역'),'retry':'재시도','preflight':'준비'}.get(phase, phase),
                  done=done(), total=total, requests=requests, retries=retries, errors=len(errors),
                  eta_seconds=(elapsed / new_done * (total - done())) if new_done else None,
                  elapsed_seconds=elapsed, message=message, **last_metrics, **extra))
@@ -143,7 +143,7 @@ def _run(folder, run_id, config, files, cancel, progress, client):
         payload = dict(work=config['work'], episode=current.get('file'), fixed_notes=_bound(fixed, 4000),
                        recent_translations=state['pairs'][-4:], context=context,
                        translate=[dict(id=ids[c.id], text=c.text, speaker=c.speaker) for c in targets])
-        if issues: payload['repair_issues'] = issues
+        if issues: payload['repair_issues'] = {ids[c.id]:issues.get(ids[c.id],[]) for c in targets}
         # Protocol is not user editable. Translation style lives in a template.
         system = template_for(config) + '\n' + config.get('instructions', '') + '\n' + PROTOCOL
         return [{'role':'system','content':system}, {'role':'user','content':json.dumps(payload,ensure_ascii=False)}]
@@ -179,7 +179,7 @@ def _run(folder, run_id, config, files, cancel, progress, client):
         for attempt in range(3):
             check(); requests += 1
             if repair or attempt: retries += 1
-            current.update(first=targets[0].id+1,last=targets[-1].id+1)
+            current.update(first=targets[0].id+1,last=targets[-1].id+1,operation='재번역' if repair else '번역')
             emit('request', f"{targets[0].id+1}–{targets[-1].id+1} · {len(targets)}개 ID 요청", repair=repair)
             try:
                 return client.chat(msg, max_tokens=output_limit, temperature=config.get('temperature',0.7),
