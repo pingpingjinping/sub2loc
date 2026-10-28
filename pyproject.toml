@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sub2loc"
-version = "0.2.7"
+version = "0.3.0"
 description = "Local, work-aware ASS subtitle translator via an OpenAI-compatible API"
 requires-python = ">=3.10"
 dependencies = []
@@ -17,7 +17,7 @@ sub2loc = "sub2loc.server:main"
 sub2loc-desktop = "sub2loc.desktop:main"
 
 [tool.setuptools.package-data]
-sub2loc = ["ui.html"]
+sub2loc = ["ui.html", "templates/*.txt"]
 
 [tool.setuptools.packages.find]
 include = ["sub2loc*"]

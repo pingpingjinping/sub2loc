@@ -1,6 +1,8 @@
 """Desktop queue, explicit work matching, and safe output planning (no Qt dependency)."""
 from dataclasses import asdict, dataclass, field
 import json
+import math
+import time
 import os
 from pathlib import Path
 import re
@@ -33,6 +35,7 @@ class Work:
     notes: str = ''
     reference: str = ''
     instructions: str = ''
+    glossary: str = ''
 
     @classmethod
     def manual(cls, title):
@@ -109,6 +112,7 @@ class Workspace:
         previous = self.works.get(work.id)
         if previous:
             # Re-matching must never discard the user's names/character notes.
+            work.glossary = previous.glossary
             work.notes = previous.notes
             work.instructions = previous.instructions
             work.reference = previous.reference or work.reference
@@ -156,9 +160,9 @@ def write_result(path, raw):
 def validate_settings(settings):
     config = dict(settings)
     config['url'] = base_url(config.get('url', ''))
-    if not config.get('model', '').strip() or not config.get('target', '').strip():
+    if (not config.get('model', '').strip() and config.get('provider') != 'polystrata') or not config.get('target', '').strip():
         raise ValueError('모델명과 번역 언어를 입력하세요.')
-    for key, low, high in (('batch_size', 1, 64), ('timeout', 5, 1800), ('max_tokens', 256, 32768)):
+    for key, low, high in (('batch_size', 1, 200), ('timeout', 5, 1800), ('max_tokens', 256, 32768)):
         if type(config.get(key)) is not int or not low <= config[key] <= high:
             raise ValueError(f'{key} 설정이 올바르지 않습니다.')
     if config.get('encoding') not in ('utf-8-sig', 'utf-16', 'cp932', 'cp949'):
@@ -168,7 +172,23 @@ def validate_settings(settings):
         raise ValueError('컨텍스트 크기는 1024–131072 범위로 입력하세요.')
     if type(config.get('hide_readings', False)) is not bool:
         raise ValueError('독음 숨기기 설정이 올바르지 않습니다.')
-    mode_for(config)
+    if config.get('provider', 'openai') not in ('openai','polystrata'):
+        raise ValueError('API 제공자 설정이 올바르지 않습니다.')
+    if 'temperature' in config and (type(config['temperature']) not in (int,float) or not math.isfinite(config['temperature']) or not 0 <= config['temperature'] <= 2):
+        raise ValueError('Temperature는 0–2 범위로 입력하세요.')
+    if type(config.get('stream',False)) is not bool or config.get('thinking','none') not in ('server','none','low','medium','high'):
+        raise ValueError('스트리밍/Thinking 설정이 올바르지 않습니다.')
+    if mode_for(config) == 'identified':
+        config.setdefault('input_tokens', min(20000, config['context_tokens']-config['max_tokens']-1024))
+        if type(config['input_tokens']) is not int or not 256 <= config['input_tokens'] <= 131072 or config['input_tokens']+config['max_tokens']+1024 > config['context_tokens']:
+            raise ValueError('입력 예산 + 최대 출력 + 여유 1024토큰이 컨텍스트 이하여야 합니다.')
+        if type(config.get('quality_retries',2)) is not int or not 0 <= config.get('quality_retries',2) <= 3:
+            raise ValueError('검수 재번역은 0–3회로 설정하세요.')
+        for key in ('prompt_template','allowed_foreign'):
+            if not isinstance(config.get(key,''),str) or len(config.get(key,''))>20000:
+                raise ValueError('프롬프트/허용 표기는 20000자 이하의 문자열이어야 합니다.')
+        if 'prompt_template' in config and not config['prompt_template'].strip():
+            raise ValueError('번역 프롬프트를 입력하세요.')
     return config
 
 
@@ -199,10 +219,13 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             targets.append(folder / (stem + '.translated.ass'))
         plans.append((work, entries, files, targets))
     engine, results = Engine(Path(root) / 'translations'), []
+    queue_total = sum(len(AssDocument(raw,settings['encoding'],hide_readings=settings.get('hide_readings',False)).cues) for _,_,source,_ in plans for _,raw in source)
+    prior_done = 0; prior_metrics = dict(requests=0,retries=0,errors=0)
+    queue_started = time.monotonic(); queue_new_done = 0; last_done = 0
     for work_index, (work, entries, source, targets) in enumerate(plans):
         if cancel.is_set():
             raise Cancelled('중단했습니다. 같은 목록·설정으로 다시 시작하면 이어서 처리합니다.')
-        notes = work.notes
+        notes = ('작품 용어집:\n'+work.glossary+'\n\n' if work.glossary.strip() else '') + work.notes
         if work.instructions.strip() and mode_for(settings) == 'ja-ko-vn':
             notes += '\n\n번역 지침 (사용자 설정):\n' + work.instructions
         config = dict(settings, work=work.title, work_id=work.id,
@@ -212,7 +235,21 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
         files = [(f'{i + 1:04d}-{digest(str(path))[:8]}-{path.name}', raw)
                  for i, (path, raw) in enumerate(source)]
         mapping = {name: index for (name, _), (index, _) in zip(files, entries)}
+        work_done = [0]; work_metrics = dict(requests=0,retries=0,errors=0)
         def report(**data):
+            nonlocal queue_new_done, last_done
+            work_done[0] = data.get('done',work_done[0])
+            data['global_done'] = prior_done + work_done[0]
+            data['global_total'] = queue_total
+            if data.get('phase') == 'validated':
+                queue_new_done += max(0,data['global_done']-last_done)
+            last_done = data['global_done']
+            for key in work_metrics:
+                if key in data:
+                    work_metrics[key] = data[key]
+                    data[key] += prior_metrics[key]
+            if queue_new_done:
+                data['eta_seconds'] = (time.monotonic()-queue_started)/queue_new_done*(queue_total-data['global_done'])
             data.update(work=work.title, work_index=work_index + 1, work_total=len(plans))
             if 'file' in data:
                 data['index'] = mapping[data['file']]
@@ -226,10 +263,17 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             if exc.filename in mapping:
                 exc.filename = Path(workspace.entries[mapping[exc.filename]].path).name
             raise
-        for (index, _), (_, raw), target in zip(entries, outputs, targets):
+        review = getattr(engine, 'last_review', [])
+        for (index, _), (output_name, raw), target in zip(entries, outputs, targets):
             saved = write_result(target, raw)
             results.append(str(saved))
+            internal_name = files[[i for i, _ in entries].index(index)][0]
+            file_review = [dict(r,file=Path(workspace.entries[index].path).name) for r in review if r.get('file') == internal_name]
+            if file_review:
+                atomic_json(saved.with_suffix('.review.json'), {'file': saved.name, 'mechanical_checks_only': True, 'items': file_review})
             progress(index=index, status='완료', output=str(saved), work=work.title)
+        prior_done += sum(len(AssDocument(raw,settings['encoding'],hide_readings=settings.get('hide_readings',False)).cues) for _,raw in source)
+        for key in prior_metrics: prior_metrics[key] += work_metrics[key]
         # The engine's project file remains the canonical continuity checkpoint.
         atomic_json(targets[0].parent / 'context.json', {'work': work.title, 'id': work.id, 'context': context})
     return results

@@ -6,7 +6,7 @@ https://huggingface.co/hell0ks/ja-ko-vn-12b-v2-gguf/blob/main/template
 from .ass import TOKEN
 
 INSTRUCTION = '당신은 전문 일한 번역가입니다. 주어진 일본어를 한국어로 번역하세요.'
-MODES = ('auto', 'chat', 'ja-ko-vn')
+MODES = ('auto', 'chat', 'ja-ko-vn', 'identified')
 
 
 class PromptError(ValueError):
@@ -18,6 +18,8 @@ def mode_for(config):
     if mode not in MODES:
         raise ValueError('API 호출 방식이 올바르지 않습니다.')
     model = config.get('model', '').lower().replace('_', '-')
+    if mode == 'auto' and config.get('provider') == 'polystrata':
+        mode = 'identified'
     if mode == 'auto':
         mode = 'ja-ko-vn' if 'ja-ko-vn' in model and '12b' in model else 'chat'
     if mode == 'ja-ko-vn':
