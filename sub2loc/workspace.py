@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import threading
 from typing import Callable
-from .ass import AssDocument
+from .subtitles import document_for, output_format
 from .api import base_url, OutputLimitError
 from .jako import mode_for
 from .engine import Engine, Cancelled, atomic_json, digest
@@ -151,14 +151,18 @@ def write_result(path, raw):
         except FileExistsError:
             if candidate.read_bytes() == raw:
                 return candidate
-            # Keep .translated.ass suffix so recursive import can filter outputs.
-            base = path.name.removesuffix('.translated.ass')
-            candidate = path.with_name(f'{base} ({n + 1}).translated.ass')
+            # Keep the selected output extension and generated-file marker.
+            suffix = '.translated' + path.suffix
+            base = path.name.removesuffix(suffix)
+            candidate = path.with_name(f'{base} ({n + 1}){suffix}')
     raise ValueError('동일 이름의 결과 파일이 너무 많습니다.')
 
 
 def validate_settings(settings):
     config = dict(settings)
+    output_format(config)
+    if type(config.get('strip_ass_decoration',False)) is not bool:
+        raise ValueError('ASS 색상·강조 제거 설정이 올바르지 않습니다.')
     config['url'] = base_url(config.get('url', ''))
     if (not config.get('model', '').strip() and config.get('provider') != 'polystrata') or not config.get('target', '').strip():
         raise ValueError('모델명과 번역 언어를 입력하세요.')
@@ -207,7 +211,7 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             if not path.is_file() or not 0 < path.stat().st_size <= 4 * 1024 * 1024:
                 raise ValueError(f'파일이 없거나 크기가 4MB를 넘습니다: {path.name}')
             raw = path.read_bytes()
-            AssDocument(raw, settings['encoding'])
+            document_for(raw, settings)
             name = path.stem
             names[name.casefold()] = names.get(name.casefold(), 0) + 1
             files.append((path, raw))
@@ -216,10 +220,10 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             stem = path.stem[:160]
             if names[path.stem.casefold()] > 1:
                 stem += '-' + digest(str(path))[:8]
-            targets.append(folder / (stem + '.translated.ass'))
+            targets.append(folder / (stem + '.translated.' + output_format(settings)))
         plans.append((work, entries, files, targets))
     engine, results = Engine(Path(root) / 'translations'), []
-    queue_total = sum(len(AssDocument(raw,settings['encoding'],hide_readings=settings.get('hide_readings',False)).cues) for _,_,source,_ in plans for _,raw in source)
+    queue_total = sum(len(document_for(raw,settings).cues) for _,_,source,_ in plans for _,raw in source)
     prior_done = 0; prior_metrics = dict(requests=0,retries=0,errors=0)
     queue_started = time.monotonic(); queue_new_done = 0; last_done = 0
     for work_index, (work, entries, source, targets) in enumerate(plans):
@@ -272,7 +276,7 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             if file_review:
                 atomic_json(saved.with_suffix('.review.json'), {'file': saved.name, 'mechanical_checks_only': True, 'items': file_review})
             progress(index=index, status='완료', output=str(saved), work=work.title)
-        prior_done += sum(len(AssDocument(raw,settings['encoding'],hide_readings=settings.get('hide_readings',False)).cues) for _,raw in source)
+        prior_done += sum(len(document_for(raw,settings).cues) for _,raw in source)
         for key in prior_metrics: prior_metrics[key] += work_metrics[key]
         # The engine's project file remains the canonical continuity checkpoint.
         atomic_json(targets[0].parent / 'context.json', {'work': work.title, 'id': work.id, 'context': context})

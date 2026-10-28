@@ -24,6 +24,7 @@ from .jako import mode_for
 from .engine import Cancelled
 from .timing import RunClock, format_duration
 from .profiles import POLYSTRATA, DEFAULT_TEMPLATE
+from .subtitles import FORMATS
 from .workspace import Workspace, Work, default_data_dir, translate_queue, validate_settings
 
 STYLE = '''
@@ -356,6 +357,9 @@ class MainWindow(QMainWindow):
         self.provider = QComboBox()
         self.provider.addItem('일반 OpenAI 호환 / LM Studio', 'openai')
         self.provider.addItem('PolyStrata', 'polystrata')
+        self.output_format = QComboBox()
+        for text, value in FORMATS: self.output_format.addItem(text, value)
+        self.output_format.setToolTip('번역 시작 전에 선택하세요. SRT·SMI는 서식을 제거한 대사만 번역하고 원본 시간을 붙입니다. ASS 저장분과 별도로 처리합니다.')
         self.preset_button = button('PolyStrata · Gemma 4 권장값 적용', self.apply_polystrata)
         api_layout.addWidget(self.preset_button)
         self.url = QLineEdit(); self.url.setPlaceholderText('예: http://127.0.0.1:8080/v1')
@@ -384,9 +388,13 @@ class MainWindow(QMainWindow):
         self.quality_retries = QSpinBox(); self.quality_retries.setRange(0,3); self.quality_retries.setValue(2)
         self.prompt_template = QPlainTextEdit(DEFAULT_TEMPLATE); self.prompt_template.setMinimumHeight(150)
         self.allowed_foreign = QPlainTextEdit(); self.allowed_foreign.setMaximumHeight(70); self.allowed_foreign.setPlaceholderText('자동 검수에서 허용할 일본어·한자 표기 · 한 줄에 하나')
-        for text, widget in [('API 제공자',self.provider), ('API 기본 주소', self.url), ('모델', self.model), ('호출 방식', self.api_mode), ('API 키', self.key), ('Temperature',self.temperature), ('Thinking',self.thinking), ('응답 방식',self.streaming)]:
+        for text, widget in [('저장 형식',self.output_format), ('API 제공자',self.provider), ('API 기본 주소', self.url), ('모델', self.model), ('호출 방식', self.api_mode), ('API 키', self.key), ('Temperature',self.temperature), ('Thinking',self.thinking), ('응답 방식',self.streaming)]:
             form.addRow(text, widget)
         api_layout.addLayout(form)
+        self.format_hint = label('', 'muted'); api_layout.addWidget(self.format_hint)
+        self.strip_ass_decoration = QCheckBox('ASS 대사 내 색상·강조 태그 제거 (위치·크기 유지)')
+        self.strip_ass_decoration.setToolTip('색상 \\c·\\1c–\\4c와 굵게 \\b·기울임 \\i·밑줄 \\u·취소선 \\s만 제거합니다. Style 정의의 기본 색상·서식, 위치·크기·너비·투명도·줄바꿈은 유지합니다. 켜면 기존 ASS 저장분과 별도로 번역합니다.')
+        api_layout.addWidget(self.strip_ass_decoration)
         self.models_button = button('연결 확인 · 모델 조회', self.fetch_models)
         api_layout.addWidget(self.models_button)
         self.probe_button = button('짧은 번역 테스트', self.probe_connection)
@@ -416,6 +424,8 @@ class MainWindow(QMainWindow):
         self.provider.currentIndexChanged.connect(self.update_api_hint)
         self.api_mode.currentIndexChanged.connect(self.update_api_hint)
         self.model.currentTextChanged.connect(self.update_api_hint)
+        self.output_format.currentIndexChanged.connect(self.update_api_hint)
+        self.strip_ass_decoration.toggled.connect(self.update_api_hint)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(api_container)
         right.addTab(scroll, '번역 API')
         self.settings_tabs = right
@@ -455,6 +465,8 @@ class MainWindow(QMainWindow):
 
     def load_settings(self):
         s = self.workspace.settings
+        self.output_format.setCurrentIndex(max(0,self.output_format.findData(s.get('output_format','ass'))))
+        self.strip_ass_decoration.setChecked(s.get('strip_ass_decoration') is True)
         self.hide_readings.setChecked(s.get('hide_readings') is True)
         self.provider.setCurrentIndex(max(0,self.provider.findData(s.get('provider','openai'))))
         self.thinking.setCurrentIndex(max(0,self.thinking.findData(s.get('thinking','none'))))
@@ -474,7 +486,7 @@ class MainWindow(QMainWindow):
         if index >= 0: self.encoding.setCurrentIndex(index)
 
     def settings(self):
-        return dict(provider=self.provider.currentData(),temperature=self.temperature.value(),thinking=self.thinking.currentData(),
+        return dict(output_format=self.output_format.currentData(),strip_ass_decoration=self.strip_ass_decoration.isChecked(),provider=self.provider.currentData(),temperature=self.temperature.value(),thinking=self.thinking.currentData(),
                     stream=self.streaming.isChecked(),input_tokens=self.input_tokens.value(),quality_retries=self.quality_retries.value(),
                     prompt_template=self.prompt_template.toPlainText(),allowed_foreign=self.allowed_foreign.toPlainText(),
                     url=self.url.text().strip(), model=self.model.currentText().strip(), key=self.key.text(),
@@ -653,11 +665,16 @@ class MainWindow(QMainWindow):
 
     def update_api_hint(self, *_):
         try:
+            plain = self.output_format.currentData() != 'ass'
+            self.strip_ass_decoration.setEnabled(not plain)
+            self.format_hint.setText('SRT·SMI: 위치·색상·강조·원본 줄배치를 제거하고 대사와 시간을 저장합니다. 보호 토큰 없이 번역하며 UTF-8로 저장합니다. ASS와 별도 번역으로 시작합니다.' if plain else 'ASS: 원본 타이밍·서식·줄배치를 보존합니다. 문장 내부 보호 토큰도 정확히 검수합니다.')
+            if not plain and self.strip_ass_decoration.isChecked():
+                self.format_hint.setText('ASS 색상·강조 제거: 대사 내 지정 태그만 제거합니다. 위치·크기·너비·줄바꿈과 Style 정의는 유지하며, 기존 ASS 저장분과 별도로 번역합니다.')
             mode = mode_for(self.settings())
             self.thinking.setEnabled(mode=='identified' and self.provider.currentData()=='polystrata')
             for control in (self.streaming,self.input_tokens,self.quality_retries,self.prompt_template,self.allowed_foreign): control.setEnabled(mode=='identified')
             if mode == 'identified':
-                self.api_hint.setText('고유 ID로 순서와 무관하게 매칭하고 ASS 토큰을 검증합니다. 정상 ID는 저장하고 문제 ID만 문맥과 함께 재번역합니다. 100대사는 상한이며 입력·출력 예산에 따라 조정됩니다. Thinking 제어는 PolyStrata에서만 전송합니다.')
+                self.api_hint.setText(('고유 ID로 순서와 무관하게 매칭하고 대사만 검수합니다. ' if plain else '고유 ID로 순서와 무관하게 매칭하고 ASS 토큰을 검증합니다. ')+'정상 ID는 저장하고 문제 ID만 문맥과 함께 재번역합니다. 100대사는 상한이며 입력·출력 예산에 따라 조정됩니다. Thinking 제어는 PolyStrata에서만 전송합니다.')
                 return
             special = mode == 'ja-ko-vn'
             self.batch.setEnabled(True)

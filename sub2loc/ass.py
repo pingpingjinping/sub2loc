@@ -16,6 +16,8 @@ class Cue:
     style: str
     text: str
     protected: list[str]
+    start: str = ''
+    end: str = ''
 
     def restore(self, translated: str) -> str:
         expected = [f'⟪S2L:{i}⟫' for i in range(len(self.protected))]
@@ -120,7 +122,7 @@ class AssDocument:
             get = lambda name: values[fields.index(name)].strip() if name in fields else ''
             prefix = lead + ':' + (','.join(values[:-1]) + ',' if len(values) > 1 else '')
             self.cues.append(Cue(len(self.cues), n, prefix,
-                                 ending, get('name'), get('style'), masked, saved))
+                                 ending, get('name'), get('style'), masked, saved, get('start'), get('end')))
         if section == '' or not any(x.strip().lower() == '[events]' for x in self.lines):
             raise ValueError('ASS Events 섹션을 찾을 수 없습니다.')
         readings = reading_candidates(self.cues)

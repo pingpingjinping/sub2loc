@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import zipfile
 from .api import Client, base_url
 from .engine import Engine, Cancelled
+from .subtitles import output_format
 
 ENCODINGS = {'utf-8-sig', 'utf-16', 'cp932', 'cp949'}
 
@@ -38,6 +39,10 @@ def validate(data):
               'context_tokens': integer('context_tokens', 4096, 1024, 131072),
               'timeout': integer('timeout', 180, 5, 1800),
               'max_tokens': integer('max_tokens', 4096, 256, 32768)}
+    config['output_format'] = output_format(data)
+    config['strip_ass_decoration'] = data.get('strip_ass_decoration',False)
+    if type(config['strip_ass_decoration']) is not bool:
+        raise ValueError('ASS 색상·강조 제거 설정이 올바르지 않습니다.')
     if not config['work'] or not config['model'] or not config['target']:
         raise ValueError('작품명·모델명·목표 언어를 입력하세요.')
     if config['encoding'] not in ENCODINGS:
@@ -98,7 +103,7 @@ class Application:
                     archive.writestr('context.txt', context)
                 with self.guard:
                     self.archive = buffer.getvalue()
-                    self.status.update(state='complete', context=context, message='완료! 번역된 ASS 파일을 내려받으세요.')
+                    self.status.update(state='complete', context=context, message='완료! 번역된 자막 파일을 내려받으세요.')
             except Cancelled as exc:
                 self.update(state='cancelled', message=str(exc))
             except (ValueError, UnicodeError) as exc:
