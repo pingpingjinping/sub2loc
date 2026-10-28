@@ -59,6 +59,21 @@ class Client:
             raise ApiError('chat/completions 응답 형식이 맞지 않습니다.') from None
 
 
+    def complete_text(self, prompt, max_tokens=1024):
+        data = self.call('/completions', {'model': self.model, 'prompt': prompt,
+                         'temperature': 0.1, 'max_tokens': max_tokens, 'stream': False,
+                         'stop': ['<end_of_turn>', '<eos>'], 'echo': False})
+        try:
+            if data['choices'][0].get('finish_reason') == 'length':
+                raise ApiError('번역 출력이 잘렸습니다. 모델 컨텍스트 길이와 최대 출력 토큰을 확인하세요.')
+            content = data['choices'][0]['text']
+            if not isinstance(content, str):
+                raise TypeError()
+            return content
+        except (KeyError, IndexError, TypeError):
+            raise ApiError('completions 응답 형식이 맞지 않습니다. 서버의 /v1/completions 지원을 확인하세요.') from None
+
+
 class NoRedirect(request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None

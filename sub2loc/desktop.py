@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import time
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
@@ -18,6 +19,8 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .api import Client
 from .catalog import Catalog
+from .connection import test_translation
+from .jako import mode_for
 from .engine import Cancelled
 from .workspace import Workspace, Work, default_data_dir, translate_queue, validate_settings
 
@@ -235,6 +238,10 @@ class MainWindow(QMainWindow):
         self.current_work = ''
         self.loading_notes = False
         self.results = []
+        self.request_started = None
+        self.wait_message = ''
+        self.wait_timer = QTimer(self); self.wait_timer.setInterval(1000)
+        self.wait_timer.timeout.connect(self.show_wait_time)
         self.rows = {}
         self.setWindowTitle('sub2loc · 자막 번역 워크스페이스')
         self.resize(1240, 870)
@@ -290,29 +297,49 @@ class MainWindow(QMainWindow):
         self.notes = QPlainTextEdit(); self.notes.setPlaceholderText('예: 아키라는 반말, 미사키는 존댓말.\n고유명사 표기와 알고 있는 관계를 적어주세요.')
         self.notes.setMinimumHeight(150); self.notes.textChanged.connect(self.notes_changed)
         work_layout.addWidget(self.notes, 1)
-        self.reference = label('', 'muted'); work_layout.addWidget(self.reference)
+        work_layout.addWidget(label('가져온 원제 · 등장인물'))
+        self.reference = QPlainTextEdit(); self.reference.setReadOnly(True)
+        self.reference.setPlaceholderText('등장인물을 가져오면 여기에서 확인할 수 있어요.')
+        self.reference.setMaximumHeight(125); work_layout.addWidget(self.reference)
         work_layout.addWidget(label('입력한 메모를 우선합니다. 작품을 매칭해도 화자나 인물 관계를 자동으로 확정하지 않습니다.', 'muted'))
-        right.addTab(work_page, '매칭 작품')
+        work_scroll = QScrollArea(); work_scroll.setWidgetResizable(True); work_scroll.setWidget(work_page)
+        right.addTab(work_scroll, '매칭 작품')
         api_container = QWidget(); api_layout = QVBoxLayout(api_container); api_layout.setContentsMargins(18, 18, 18, 18)
         form = QFormLayout(); form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.url = QLineEdit(); self.url.setPlaceholderText('http://127.0.0.1:포트/v1')
+        self.url = QLineEdit(); self.url.setPlaceholderText('Bionic에 표시된 서버 주소 + /v1')
         self.model = QComboBox(); self.model.setEditable(True); self.model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.model.lineEdit().setPlaceholderText('정확한 모델 ID')
         self.key = QLineEdit(); self.key.setEchoMode(QLineEdit.EchoMode.Password); self.key.setPlaceholderText('필요한 경우에만 · 저장하지 않음')
+        self.api_mode = QComboBox()
+        for text, value in [('자동 (모델명으로 선택)', 'auto'), ('ja-ko-vn-12b-v2 전용', 'ja-ko-vn'), ('범용 대화형 JSON', 'chat')]:
+            self.api_mode.addItem(text, value)
         self.source = QLineEdit('auto'); self.target = QLineEdit('한국어')
         self.encoding = QComboBox()
         for text, value in [('UTF-8 (BOM 보존)', 'utf-8-sig'), ('UTF-16', 'utf-16'), ('일본어 CP932', 'cp932'), ('한국어 CP949', 'cp949')]: self.encoding.addItem(text, value)
         self.batch = QSpinBox(); self.batch.setRange(1, 64); self.batch.setValue(12)
         self.tokens = QSpinBox(); self.tokens.setRange(256, 32768); self.tokens.setSingleStep(256); self.tokens.setValue(4096)
         self.timeout = QSpinBox(); self.timeout.setRange(5, 1800); self.timeout.setValue(180); self.timeout.setSuffix(' 초')
-        for text, widget in [('API 기본 주소', self.url), ('모델', self.model), ('API 키', self.key),
-                             ('원문 언어', self.source), ('번역 언어', self.target), ('원본 인코딩', self.encoding),
-                             ('묶음 대사 수', self.batch), ('최대 출력 토큰', self.tokens), ('응답 제한 시간', self.timeout)]: form.addRow(text, widget)
+        for text, widget in [('API 기본 주소', self.url), ('모델', self.model), ('호출 방식', self.api_mode), ('API 키', self.key)]:
+            form.addRow(text, widget)
         api_layout.addLayout(form)
         self.models_button = button('연결 확인 · 모델 조회', self.fetch_models)
         api_layout.addWidget(self.models_button)
-        self.api_hint = label('자막과 작품 메모는 설정한 API 서버로 전송됩니다. 12B 모델은 8–12줄로 시작하세요.', 'muted')
-        api_layout.addWidget(self.api_hint); api_layout.addStretch()
+        self.probe_button = button('짧은 번역 테스트', self.probe_connection)
+        api_layout.addWidget(self.probe_button)
+        self.probe_result = QPlainTextEdit(); self.probe_result.setReadOnly(True)
+        self.probe_result.setPlaceholderText('오늘은 좋은 날씨네요 — 같은 짧은 번역으로 실제 API 응답을 확인해요.')
+        self.probe_result.setMaximumHeight(100); api_layout.addWidget(self.probe_result)
+        self.api_hint = label('', 'muted')
+        api_layout.addWidget(self.api_hint)
+        advanced_button = QPushButton('상세 번역 설정 펼치기'); advanced_button.setCheckable(True)
+        advanced = QWidget(); advanced_form = QFormLayout(advanced)
+        for text, widget in [('원문 언어', self.source), ('번역 언어', self.target), ('원본 인코딩', self.encoding),
+                             ('묶음 대사 수', self.batch), ('최대 출력 토큰', self.tokens), ('응답 제한 시간', self.timeout)]:
+            advanced_form.addRow(text, widget)
+        advanced.setVisible(False); advanced_button.toggled.connect(advanced.setVisible)
+        api_layout.addWidget(advanced_button); api_layout.addWidget(advanced); api_layout.addStretch()
+        self.api_mode.currentIndexChanged.connect(self.update_api_hint)
+        self.model.currentTextChanged.connect(self.update_api_hint)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(api_container)
         right.addTab(scroll, '번역 API')
         self.settings_tabs = right
@@ -324,7 +351,7 @@ class MainWindow(QMainWindow):
         self.open_button = button('결과 열기', self.open_output)
         output_row.addWidget(self.output, 1); output_row.addWidget(self.output_button); output_row.addWidget(self.open_button)
         layout.addLayout(output_row)
-        self.progress_bar = QProgressBar(); self.progress_bar.setRange(0, 100); self.progress_bar.setValue(0); self.progress_bar.setTextVisible(False)
+        self.progress_bar = QProgressBar(); self.progress_bar.setRange(0, 10000); self.progress_bar.setValue(0); self.progress_bar.setTextVisible(False)
         layout.addWidget(self.progress_bar)
         footer = QHBoxLayout()
         self.status = label('자막을 추가해 시작하세요.', 'muted'); footer.addWidget(self.status, 1)
@@ -335,6 +362,7 @@ class MainWindow(QMainWindow):
         self.mutating_controls = [self.folder_button, self.file_button, self.match_button, self.remove_button,
                                   self.up, self.down, self.unmatch, self.settings_tabs, self.output, self.output_button]
         self.load_settings()
+        self.update_api_hint()
         self.refresh()
         if self.load_error: self.status.setText(self.load_error)
 
@@ -345,11 +373,14 @@ class MainWindow(QMainWindow):
         self.model.setCurrentText(s.get('model', ''))
         for key, widget in [('batch_size', self.batch), ('max_tokens', self.tokens), ('timeout', self.timeout)]:
             if isinstance(s.get(key), int): widget.setValue(s[key])
+        mode_index = self.api_mode.findData(s.get('api_mode', 'auto'))
+        if mode_index >= 0: self.api_mode.setCurrentIndex(mode_index)
         index = self.encoding.findData(s.get('encoding', 'utf-8-sig'))
         if index >= 0: self.encoding.setCurrentIndex(index)
 
     def settings(self):
         return dict(url=self.url.text().strip(), model=self.model.currentText().strip(), key=self.key.text(),
+                    api_mode=self.api_mode.currentData(),
                     source=self.source.text().strip() or 'auto', target=self.target.text().strip(),
                     encoding=self.encoding.currentData(), batch_size=self.batch.value(),
                     max_tokens=self.tokens.value(), timeout=self.timeout.value())
@@ -437,7 +468,7 @@ class MainWindow(QMainWindow):
         self.work_details.setText(' · '.join(x for x in (work.native, work.year, work.format, work.id) if x) if work else
                                   '자막이나 폴더를 선택하고 작품 매칭을 누르세요.')
         self.character_button.setEnabled(work is not None and work.id.startswith('anilist:') and self.worker is None)
-        self.reference.setText('기본 인물 이름을 가져왔습니다.' if work and '등장인물' in work.reference else '')
+        self.reference.setPlainText(work.reference if work else '')
         self.loading_notes = False
 
     def notes_changed(self):
@@ -496,6 +527,38 @@ class MainWindow(QMainWindow):
         task.finished.connect(finished); task.start()
         return task
 
+    def update_api_hint(self, *_):
+        try:
+            special = mode_for(self.settings()) == 'ja-ko-vn'
+            self.batch.setEnabled(not special)
+            self.api_hint.setText(
+                'ja-ko-vn 전용: 일본어 텍스트 구간을 Completions로 번역합니다. '
+                'ASS 태그는 앱에서 보존하며, 작품별 메모와 최근 대사를 참고 정보로 보냅니다. '
+                '자동 줄거리 요약은 요청하지 않습니다. 최대 출력은 1024토큰으로 제한합니다.' if special else
+                '범용 대화형: 대사 묶음과 JSON 응답을 사용합니다. 자막과 작품 메모는 설정한 API 서버로 전송됩니다.')
+        except ValueError as exc:
+            self.api_hint.setText(str(exc))
+
+    def probe_connection(self):
+        if self.worker is not None or self.background_tasks:
+            self.status.setText('진행 중인 작업이 끝나면 번역 테스트를 실행할 수 있습니다.'); return
+        try:
+            config = validate_settings(self.settings())
+        except ValueError as exc:
+            self.probe_result.setPlainText(str(exc)); return
+        self.probe_button.setEnabled(False)
+        self.probe_result.setPlainText('선택한 모델로 실제 번역을 요청하고 있습니다…')
+        self.start_button.setEnabled(False)
+        def result(data):
+            mode = 'ja-ko-vn 전용 Completions' if data['mode'] == 'ja-ko-vn' else '대화형 JSON'
+            self.probe_result.setPlainText('API 응답 확인 · ' + mode + '\n원문: ' + data['source'] +
+                                           '\n번역: ' + data['translation'])
+            self.probe_button.setEnabled(True); self.start_button.setEnabled(True); self.save()
+        def failed(message):
+            self.probe_result.setPlainText(message)
+            self.probe_button.setEnabled(True); self.start_button.setEnabled(True)
+        self.background(lambda: test_translation(config), result, failed)
+
     def fetch_models(self):
         config = self.settings(); self.models_button.setEnabled(False)
         self.api_hint.setText('모델 목록을 가져오고 있습니다…')
@@ -547,27 +610,42 @@ class MainWindow(QMainWindow):
             entry.status = data.get('status', '번역 중'); self.rows[data['index']].setText(2, entry.status)
             if data.get('status') == '완료': self.save()
         if 'message' in data:
-            self.status.setText(f"{data.get('work', '')} · {data['message']}")
+            self.wait_message = f"{data.get('work', '')} · {data['message']}"
+            self.status.setText(self.wait_message)
+        if data.get('phase') in ('request', 'retry'):
+            self.request_started = time.monotonic(); self.wait_timer.start()
+            self.show_wait_time()
+        elif data.get('phase') == 'validated':
+            self.wait_timer.stop(); self.request_started = None
         if data.get('total'):
             within = data.get('done', 0) / data['total']
-            self.progress_bar.setValue(int(100 * (data.get('work_index', 1) - 1 + within) / data.get('work_total', 1)))
+            self.progress_bar.setValue(int(self.progress_bar.maximum() * (data.get('work_index', 1) - 1 + within) / data.get('work_total', 1)))
+
+    def show_wait_time(self):
+        if self.request_started is not None:
+            elapsed = int(time.monotonic() - self.request_started)
+            self.status.setText(self.wait_message + f' · 응답 대기 {elapsed}초')
 
     def job_complete(self, paths):
-        self.results = paths; self.progress_bar.setValue(100)
+        self.wait_timer.stop(); self.request_started = None
+        self.results = paths; self.progress_bar.setValue(self.progress_bar.maximum())
         self.status.setText(f'완료! {len(paths)}개 자막을 저장했습니다. 결과 열기에서 확인하세요.')
 
     def job_error(self, message):
+        self.wait_timer.stop(); self.request_started = None
         for entry in self.workspace.entries:
             if entry.status == '번역 중': entry.status = '중단' if self.worker.cancel.is_set() else '오류'
             elif entry.status == '대기': entry.status = '준비'
         self.status.setText(message)
 
     def job_finished(self):
+        self.wait_timer.stop(); self.request_started = None
         self.worker.deleteLater(); self.worker = None
         self.set_busy(False); self.refresh(); self.save()
         if self.pending_close and not self.background_tasks: self.close()
 
     def stop(self):
+        self.wait_timer.stop(); self.request_started = None
         if self.worker is not None:
             self.worker.cancel.set(); self.stop_button.setEnabled(False)
             self.status.setText('중단 요청을 보냈습니다. 진행 중인 API 응답과 저장을 기다립니다…')

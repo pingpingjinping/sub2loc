@@ -8,6 +8,7 @@ import threading
 from typing import Callable
 from .ass import AssDocument
 from .api import base_url
+from .jako import mode_for
 from .engine import Engine, Cancelled, atomic_json, digest
 
 
@@ -160,6 +161,7 @@ def validate_settings(settings):
             raise ValueError(f'{key} 설정이 올바르지 않습니다.')
     if config.get('encoding') not in ('utf-8-sig', 'utf-16', 'cp932', 'cp949'):
         raise ValueError('원본 인코딩을 확인하세요.')
+    mode_for(config)
     return config
 
 
@@ -185,7 +187,7 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
         folder = Path(output_root) / (safe_component(work.title) + '-' + digest(work.id)[:8])
         for path, _ in files:
             stem = path.stem[:160]
-            if names[stem.casefold()] > 1:
+            if names[path.stem.casefold()] > 1:
                 stem += '-' + digest(str(path))[:8]
             targets.append(folder / (stem + '.translated.ass'))
         plans.append((work, entries, files, targets))
@@ -203,6 +205,9 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             data.update(work=work.title, work_index=work_index + 1, work_total=len(plans))
             if 'file' in data:
                 data['index'] = mapping[data['file']]
+                if 'message' in data:
+                    original = Path(workspace.entries[data['index']].path).name
+                    data['message'] = data['message'].replace(data['file'], original)
             progress(**data)
         outputs, context = engine.translate(config, files, cancel, report, client)
         for (index, _), (_, raw), target in zip(entries, outputs, targets):
