@@ -221,6 +221,37 @@ class MatchDialog(QDialog):
         super().reject()
 
 
+class GuidanceDialog(QDialog):
+    def __init__(self, draft, work, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('AniList 정보 · 번역 지침 초안')
+        self.resize(760, 700)
+        layout = QVBoxLayout(self)
+        layout.addWidget(label(draft.title, 'section'))
+        layout.addWidget(label('작품 소개·인물 이름을 항목별로 정리했습니다. 소개는 AniList 원문이며 자동 번역·요약하지 않습니다. '
+                               '자료를 확인·수정한 뒤 적용하세요. 기존 고정 메모는 유지됩니다.', 'muted'))
+        layout.addWidget(label('번역 지침 · 편집 가능'))
+        self.instructions = QPlainTextEdit(work.instructions or draft.instructions)
+        self.instructions.setMinimumHeight(120); layout.addWidget(self.instructions, 1)
+        layout.addWidget(button('기본 지침 초안 불러오기', lambda: self.instructions.setPlainText(draft.instructions)))
+        layout.addWidget(label('작품·인물 참고 자료 · 원문, 편집 가능'))
+        self.reference = QPlainTextEdit(draft.reference)
+        self.reference.setMinimumHeight(210); layout.addWidget(self.reference, 2)
+        self.hint = label('미래 전개가 포함될 수 있습니다. 긴 자료는 모델 컨텍스트에 맞춰 일부만 전달됩니다.', 'muted')
+        layout.addWidget(self.hint)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText('이 작품에 적용')
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('취소')
+        self.buttons.accepted.connect(self.accept); self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def accept(self):
+        if len(self.instructions.toPlainText()) > 5000 or len(self.reference.toPlainText()) > 12000:
+            self.hint.setText('번역 지침은 5,000자, 참고 자료는 12,000자까지 사용할 수 있습니다. 내용을 줄여주세요.')
+            return
+        super().accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, data_dir=None):
         super().__init__()
@@ -291,13 +322,20 @@ class MainWindow(QMainWindow):
         self.work_title = label('목록에서 자막을 선택하세요.'); self.work_title.setStyleSheet('font-size:16px;font-weight:700;')
         work_layout.addWidget(self.work_title)
         self.work_details = label('작품별로 맥락이 분리되어 저장됩니다.', 'muted'); work_layout.addWidget(self.work_details)
-        self.character_button = button('기본 등장인물 이름 가져오기', self.fetch_characters)
+        self.guidance_button = button('AniList 정보로 지침 만들기', self.fetch_guidance, True)
+        work_layout.addWidget(self.guidance_button)
+        self.character_button = button('등장인물 이름만 가져오기', self.fetch_characters)
         work_layout.addWidget(self.character_button)
         work_layout.addWidget(label('호칭 · 말투 · 고정 용어'))
         self.notes = QPlainTextEdit(); self.notes.setPlaceholderText('예: 아키라는 반말, 미사키는 존댓말.\n고유명사 표기와 알고 있는 관계를 적어주세요.')
-        self.notes.setMinimumHeight(150); self.notes.textChanged.connect(self.notes_changed)
+        self.notes.setMinimumHeight(100); self.notes.textChanged.connect(self.notes_changed)
         work_layout.addWidget(self.notes, 1)
-        work_layout.addWidget(label('가져온 원제 · 등장인물'))
+        work_layout.addWidget(label('작품별 번역 지침'))
+        self.instructions = QPlainTextEdit()
+        self.instructions.setPlaceholderText('예: 이름 표기는 고정 메모를 따르고, 말투는 앞뒤 대사를 기준으로 유지하세요.')
+        self.instructions.setMinimumHeight(110); self.instructions.textChanged.connect(self.instructions_changed)
+        work_layout.addWidget(self.instructions, 1)
+        work_layout.addWidget(label('가져온 작품 · 인물 참고 자료'))
         self.reference = QPlainTextEdit(); self.reference.setReadOnly(True)
         self.reference.setPlaceholderText('등장인물을 가져오면 여기에서 확인할 수 있어요.')
         self.reference.setMaximumHeight(125); work_layout.addWidget(self.reference)
@@ -471,10 +509,13 @@ class MainWindow(QMainWindow):
         self.loading_notes = True
         self.notes.setEnabled(work is not None and self.worker is None)
         self.notes.setPlainText(work.notes if work else '')
+        self.instructions.setEnabled(work is not None and self.worker is None)
+        self.instructions.setPlainText(work.instructions if work else '')
         self.work_title.setText(work.title if work else ('여러 작품이 선택되었습니다.' if len(ids) > 1 else '작품을 매칭하세요.'))
         self.work_details.setText(' · '.join(x for x in (work.native, work.year, work.format, work.id) if x) if work else
                                   '자막이나 폴더를 선택하고 작품 매칭을 누르세요.')
-        self.character_button.setEnabled(work is not None and work.id.startswith('anilist:') and self.worker is None)
+        can_fetch = work is not None and work.id.startswith('anilist:') and self.worker is None and not self.background_tasks
+        self.character_button.setEnabled(can_fetch); self.guidance_button.setEnabled(can_fetch)
         self.reference.setPlainText(work.reference if work else '')
         self.loading_notes = False
 
@@ -488,6 +529,16 @@ class MainWindow(QMainWindow):
             self.loading_notes = False
             self.status.setText('인물·용어 메모는 5,000자까지 사용할 수 있습니다.')
         self.workspace.works[self.current_work].notes = text
+        self.save()
+
+    def instructions_changed(self):
+        if self.loading_notes or not self.current_work: return
+        text = self.instructions.toPlainText()
+        if len(text) > 5000:
+            text = text[:5000]; self.loading_notes = True
+            self.instructions.setPlainText(text); self.loading_notes = False
+            self.status.setText('번역 지침은 5,000자까지 사용할 수 있습니다.')
+        self.workspace.works[self.current_work].instructions = text
         self.save()
 
     def match_selected(self):
@@ -530,6 +581,7 @@ class MainWindow(QMainWindow):
         task.error.connect(on_error or self.status.setText)
         def finished():
             self.background_tasks.remove(task); task.deleteLater()
+            self.selection_changed()
             if self.pending_close and self.worker is None and not self.background_tasks: self.close()
         task.finished.connect(finished); task.start()
         return task
@@ -580,7 +632,7 @@ class MainWindow(QMainWindow):
 
     def fetch_characters(self):
         work_id = self.current_work
-        if not work_id: return
+        if not work_id or self.worker is not None or self.background_tasks: return
         self.character_button.setEnabled(False); self.status.setText('기본 등장인물 이름을 가져오고 있습니다…')
         def result(text):
             work = self.workspace.works[work_id]
@@ -589,6 +641,26 @@ class MainWindow(QMainWindow):
             self.selection_changed(); self.save(); self.status.setText('등장인물 이름을 가져왔습니다. 말투·관계는 메모로 보완하세요.')
         def failed(message): self.selection_changed(); self.status.setText(message)
         self.background(lambda: Catalog().character_notes(work_id), result, failed)
+
+    def fetch_guidance(self):
+        work_id = self.current_work
+        if not work_id or self.worker is not None or self.background_tasks: return
+        self.guidance_button.setEnabled(False); self.character_button.setEnabled(False)
+        self.status.setText('AniList 작품·인물 정보를 가져와 지침 초안을 준비하고 있습니다…')
+        def result(draft):
+            work = self.workspace.works.get(work_id)
+            if work is None or self.pending_close: return
+            if draft.work_id != work_id:
+                self.status.setText('선택한 작품과 가져온 정보의 ID가 다릅니다. 적용하지 않았습니다.'); return
+            dialog = GuidanceDialog(draft, work, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                work.instructions = dialog.instructions.toPlainText().strip()
+                work.reference = dialog.reference.toPlainText().strip()
+                self.selection_changed(); self.save()
+                self.status.setText(f'{work.title}: 번역 지침과 참고 자료를 저장했습니다.')
+            else:
+                self.status.setText('지침 초안 적용을 취소했습니다.')
+        self.background(lambda: Catalog().guidance(work_id), result)
 
     def set_busy(self, busy):
         for control in self.mutating_controls: control.setEnabled(not busy)

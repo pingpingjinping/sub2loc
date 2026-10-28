@@ -32,6 +32,7 @@ class Work:
     episodes: str = ''
     notes: str = ''
     reference: str = ''
+    instructions: str = ''
 
     @classmethod
     def manual(cls, title):
@@ -109,7 +110,8 @@ class Workspace:
         if previous:
             # Re-matching must never discard the user's names/character notes.
             work.notes = previous.notes
-            work.reference = work.reference or previous.reference
+            work.instructions = previous.instructions
+            work.reference = previous.reference or work.reference
         self.works[work.id] = work
         for i in indices:
             self.entries[i].work_id = work.id
@@ -198,8 +200,12 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
     for work_index, (work, entries, source, targets) in enumerate(plans):
         if cancel.is_set():
             raise Cancelled('중단했습니다. 같은 목록·설정으로 다시 시작하면 이어서 처리합니다.')
+        notes = work.notes
+        if work.instructions.strip() and mode_for(settings) == 'ja-ko-vn':
+            notes += '\n\n번역 지침 (사용자 설정):\n' + work.instructions
         config = dict(settings, work=work.title, work_id=work.id,
-                      notes=(work.notes + '\n\n' + work.reference).strip())
+                      notes=(notes + '\n\n' + work.reference).strip())
+        if work.instructions.strip(): config['instructions'] = work.instructions.strip()
         # Stable path-aware internal names avoid duplicate basenames across folders.
         files = [(f'{i + 1:04d}-{digest(str(path))[:8]}-{path.name}', raw)
                  for i, (path, raw) in enumerate(source)]

@@ -166,7 +166,10 @@ class Engine:
                            'surrounding_source_only': [{'id': c.id, 'speaker': c.speaker, 'text': c.text}
                                for c in cues[max(0, start - 2):start] + cues[end:end + 2]],
                            'translate': [{'id': c.id, 'speaker': c.speaker, 'style': c.style, 'text': c.text} for c in batch]}
-                messages = [{'role': 'system', 'content': SYSTEM},
+                system = SYSTEM
+                if config.get('instructions'):
+                    system += '\nUser-configured translation style preferences (keep required IDs and ASS controls unchanged):\n' + config['instructions']
+                messages = [{'role': 'system', 'content': system},
                             {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}]
                 progress(file=name, done=sum(len(d.cues) for d in documents[:file_index]) + start,
                          total=total, phase='request', message=f'{name}: {start + 1}–{end} / {len(cues)} 대사 요청')
