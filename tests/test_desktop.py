@@ -36,7 +36,7 @@ class FakeClient:
 class WorkspaceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         for name in ('A/02.ass', 'A/01.ass', 'B/01.ass', 'A/old.translated.ass', 'A/ignored.txt'):
             path = self.root / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(SAMPLE)
 
@@ -125,7 +125,7 @@ class DesktopTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name); self.files = self.root / '字幕'; self.files.mkdir()
+        self.root = Path(self.tmp.name).resolve(); self.files = self.root / '字幕'; self.files.mkdir()
         for name in ('01.ass', '02.ass'): (self.files / name).write_bytes(SAMPLE)
         self.window = MainWindow(self.root / 'appdata'); self.window.show()
         self.addCleanup(self.window.close)
