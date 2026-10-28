@@ -80,9 +80,28 @@ class Engine:
 
     def _translate(self, config, files, cancel, progress, client):
         client = client or Client(config['url'], config['model'], config.get('key', ''),
-                                  config['timeout'], config['max_tokens'])
+                                  config['timeout'], config['max_tokens'], temperature=config.get('temperature'))
         mode = mode_for(config)
+        self.last_review = []
+        if mode == 'identified':
+            if not config.get('model'):
+                detected = client.discover()
+                client.model = detected['id']
+                config = dict(config, model=detected['id'])
+                capacity = detected.get('meta', {}).get('n_ctx')
+                if type(capacity) is int and capacity > 0:
+                    config['context_tokens'] = min(config.get('context_tokens',32768),capacity)
+                progress(phase='preflight', message='감지한 모델: ' + detected['id'])
+            from .identified import translate
+            outputs, context, self.last_review = translate(self.root, config, files, cancel, progress, client)
+            return outputs, context
         identity = {k: v for k, v in config.items() if k not in ('key', 'api_mode')}
+        # New chat-only controls must not invalidate unchanged legacy checkpoints.
+        for key in ('provider','stream','thinking','input_tokens','quality_retries','prompt_template','allowed_foreign'):
+            identity.pop(key,None)
+        if identity.get('temperature') == (0.1 if mode == 'ja-ko-vn' else 0.2):
+            identity.pop('temperature',None)
+
         if mode == 'ja-ko-vn':
             identity['request_mode'] = 'ja-ko-vn-v3'
             identity.setdefault('context_tokens', 4096)

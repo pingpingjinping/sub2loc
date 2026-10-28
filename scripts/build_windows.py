@@ -13,7 +13,7 @@ def main():
     if sys.platform != 'win32':
         raise SystemExit('Windows EXE는 Windows에서 빌드하세요. GitHub Actions도 사용할 수 있습니다.')
     subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--windowed',
-                    '--onedir', '--noupx', '--name', 'sub2loc', '--version-file',
+                    '--onedir', '--noupx', '--collect-data', 'sub2loc', '--name', 'sub2loc', '--version-file',
                     str(ROOT / 'scripts/windows-version.txt'), str(ROOT / 'desktop_entry.py')], cwd=ROOT, check=True)
     target = ROOT / 'dist/sub2loc'
     for name in ('README.md', 'THIRD_PARTY_NOTICES.md'):

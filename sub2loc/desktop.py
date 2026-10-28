@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSpinBox, QDoubleSpinBox,
     QSplitter, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from . import __version__
@@ -23,6 +23,7 @@ from .connection import test_translation
 from .jako import mode_for
 from .engine import Cancelled
 from .timing import RunClock, format_duration
+from .profiles import POLYSTRATA, DEFAULT_TEMPLATE
 from .workspace import Workspace, Work, default_data_dir, translate_queue, validate_settings
 
 STYLE = '''
@@ -334,6 +335,10 @@ class MainWindow(QMainWindow):
         self.notes = QPlainTextEdit(); self.notes.setPlaceholderText('예: 아키라는 반말, 미사키는 존댓말.\n고유명사 표기와 알고 있는 관계를 적어주세요.')
         self.notes.setMinimumHeight(100); self.notes.textChanged.connect(self.notes_changed)
         work_layout.addWidget(self.notes, 1)
+        work_layout.addWidget(label('작품 용어집 · 원문=한국어'))
+        self.glossary = QPlainTextEdit(); self.glossary.setMaximumHeight(100)
+        self.glossary.setPlaceholderText('ゾンビ=좀비\n傀人=카이리')
+        self.glossary.textChanged.connect(self.glossary_changed); work_layout.addWidget(self.glossary)
         work_layout.addWidget(label('작품별 번역 지침'))
         self.instructions = QPlainTextEdit()
         self.instructions.setPlaceholderText('예: 이름 표기는 고정 메모를 따르고, 말투는 앞뒤 대사를 기준으로 유지하세요.')
@@ -348,12 +353,17 @@ class MainWindow(QMainWindow):
         right.addTab(work_scroll, '매칭 작품')
         api_container = QWidget(); api_layout = QVBoxLayout(api_container); api_layout.setContentsMargins(18, 18, 18, 18)
         form = QFormLayout(); form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.url = QLineEdit(); self.url.setPlaceholderText('Bionic에 표시된 서버 주소 + /v1')
+        self.provider = QComboBox()
+        self.provider.addItem('일반 OpenAI 호환 / LM Studio', 'openai')
+        self.provider.addItem('PolyStrata', 'polystrata')
+        self.preset_button = button('PolyStrata · Gemma 4 권장값 적용', self.apply_polystrata)
+        api_layout.addWidget(self.preset_button)
+        self.url = QLineEdit(); self.url.setPlaceholderText('예: http://127.0.0.1:8080/v1')
         self.model = QComboBox(); self.model.setEditable(True); self.model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.model.lineEdit().setPlaceholderText('정확한 모델 ID')
+        self.model.lineEdit().setPlaceholderText('PolyStrata는 비워두면 실행 중 모델 자동 감지')
         self.key = QLineEdit(); self.key.setEchoMode(QLineEdit.EchoMode.Password); self.key.setPlaceholderText('필요한 경우에만 · 저장하지 않음')
         self.api_mode = QComboBox()
-        for text, value in [('자동 (모델명으로 선택)', 'auto'), ('ja-ko-vn-12b-v2 전용', 'ja-ko-vn'), ('범용 대화형 JSON', 'chat')]:
+        for text, value in [('자동 (모델명으로 선택)', 'auto'), ('ja-ko-vn-12b-v2 전용', 'ja-ko-vn'), ('범용 대화형 JSON', 'chat'), ('ID 기반 자막 번역 · 자동 검수', 'identified')]:
             self.api_mode.addItem(text, value)
         self.source = QLineEdit('auto'); self.target = QLineEdit('한국어')
         self.encoding = QComboBox()
@@ -361,11 +371,19 @@ class MainWindow(QMainWindow):
         self.context_tokens = QSpinBox(); self.context_tokens.setRange(1024, 131072)
         self.context_tokens.setSingleStep(1024); self.context_tokens.setValue(4096)
         self.context_tokens.setToolTip('Bionic에 실제 로드한 컨텍스트 크기와 맞추세요. 서버 설정을 자동으로 바꾸지는 않습니다.')
-        self.batch = QSpinBox(); self.batch.setRange(1, 64); self.batch.setValue(12)
+        self.batch = QSpinBox(); self.batch.setRange(1, 200); self.batch.setValue(12)
         self.tokens = QSpinBox(); self.tokens.setRange(256, 32768); self.tokens.setSingleStep(256); self.tokens.setValue(4096)
         self.tokens.setToolTip('ja-ko-vn 전용 모드에서는 컨텍스트 절반 이하로 출력 공간을 예약합니다.')
         self.timeout = QSpinBox(); self.timeout.setRange(5, 1800); self.timeout.setValue(180); self.timeout.setSuffix(' 초')
-        for text, widget in [('API 기본 주소', self.url), ('모델', self.model), ('호출 방식', self.api_mode), ('API 키', self.key)]:
+        self.temperature = QDoubleSpinBox(); self.temperature.setRange(0, 2); self.temperature.setSingleStep(0.1); self.temperature.setValue(0.2)
+        self.thinking = QComboBox()
+        for title,value in [('OFF', 'none'),('서버 기본값', 'server'),('Low','low'),('Medium','medium'),('High','high')]: self.thinking.addItem(title,value)
+        self.streaming = QCheckBox('스트리밍 응답 받기')
+        self.input_tokens = QSpinBox(); self.input_tokens.setRange(256,131072); self.input_tokens.setValue(20000); self.input_tokens.setSingleStep(1024)
+        self.quality_retries = QSpinBox(); self.quality_retries.setRange(0,3); self.quality_retries.setValue(2)
+        self.prompt_template = QPlainTextEdit(DEFAULT_TEMPLATE); self.prompt_template.setMinimumHeight(150)
+        self.allowed_foreign = QPlainTextEdit(); self.allowed_foreign.setMaximumHeight(70); self.allowed_foreign.setPlaceholderText('자동 검수에서 허용할 일본어·한자 표기 · 한 줄에 하나')
+        for text, widget in [('API 제공자',self.provider), ('API 기본 주소', self.url), ('모델', self.model), ('호출 방식', self.api_mode), ('API 키', self.key), ('Temperature',self.temperature), ('Thinking',self.thinking), ('응답 방식',self.streaming)]:
             form.addRow(text, widget)
         api_layout.addLayout(form)
         self.models_button = button('연결 확인 · 모델 조회', self.fetch_models)
@@ -385,11 +403,16 @@ class MainWindow(QMainWindow):
         self.hide_readings = QCheckBox('독음(루비) 추정 행을 숨기기')
         self.hide_readings.setToolTip('같은 시간의 본문 위에 작게 배치된 일본어 읽기 표시를 추정합니다. 켜면 해당 행은 번역하지 않고 Comment로 보관합니다. 잘못 검출될 수 있어 기본은 꺼져 있습니다.')
         advanced_form.addRow(self.hide_readings)
+        advanced_form.addRow('입력 토큰 예산',self.input_tokens)
+        advanced_form.addRow('문제 ID 재번역 횟수',self.quality_retries)
+        advanced_form.addRow('번역 프롬프트',self.prompt_template)
+        advanced_form.addRow('허용 문자 표기',self.allowed_foreign)
         for text, widget in [('원문 언어', self.source), ('번역 언어', self.target), ('원본 인코딩', self.encoding),
                              ('묶음 최대 대사', self.batch), ('컨텍스트 토큰', self.context_tokens), ('최대 출력 토큰', self.tokens), ('응답 제한 시간', self.timeout)]:
             advanced_form.addRow(text, widget)
         advanced.setVisible(False); advanced_button.toggled.connect(advanced.setVisible)
         api_layout.addWidget(advanced_button); api_layout.addWidget(advanced); api_layout.addStretch()
+        self.provider.currentIndexChanged.connect(self.update_api_hint)
         self.api_mode.currentIndexChanged.connect(self.update_api_hint)
         self.model.currentTextChanged.connect(self.update_api_hint)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(api_container)
@@ -405,6 +428,8 @@ class MainWindow(QMainWindow):
         layout.addLayout(output_row)
         self.progress_bar = QProgressBar(); self.progress_bar.setRange(0, 10000); self.progress_bar.setValue(0); self.progress_bar.setTextVisible(False)
         layout.addWidget(self.progress_bar)
+        self.metrics_label = label('', 'muted'); layout.addWidget(self.metrics_label)
+        self.metrics_data = {}
         self.run_log = QPlainTextEdit(); self.run_log.setReadOnly(True)
         self.run_log.document().setMaximumBlockCount(300)
         self.run_log.setMaximumHeight(130); self.run_log.setVisible(False)
@@ -430,6 +455,13 @@ class MainWindow(QMainWindow):
     def load_settings(self):
         s = self.workspace.settings
         self.hide_readings.setChecked(s.get('hide_readings') is True)
+        self.provider.setCurrentIndex(max(0,self.provider.findData(s.get('provider','openai'))))
+        self.thinking.setCurrentIndex(max(0,self.thinking.findData(s.get('thinking','none'))))
+        self.streaming.setChecked(s.get('stream') is True)
+        self.temperature.setValue(s.get('temperature',0.1 if s.get('api_mode')=='ja-ko-vn' or 'ja-ko-vn' in s.get('model','') else 0.2))
+        self.input_tokens.setValue(s.get('input_tokens',20000)); self.quality_retries.setValue(s.get('quality_retries',2))
+        self.prompt_template.setPlainText(s.get('prompt_template',DEFAULT_TEMPLATE))
+        self.allowed_foreign.setPlainText(s.get('allowed_foreign',''))
         for key, widget in [('url', self.url), ('source', self.source), ('target', self.target), ('output', self.output)]:
             if key in s: widget.setText(str(s[key]))
         self.model.setCurrentText(s.get('model', ''))
@@ -441,7 +473,10 @@ class MainWindow(QMainWindow):
         if index >= 0: self.encoding.setCurrentIndex(index)
 
     def settings(self):
-        return dict(url=self.url.text().strip(), model=self.model.currentText().strip(), key=self.key.text(),
+        return dict(provider=self.provider.currentData(),temperature=self.temperature.value(),thinking=self.thinking.currentData(),
+                    stream=self.streaming.isChecked(),input_tokens=self.input_tokens.value(),quality_retries=self.quality_retries.value(),
+                    prompt_template=self.prompt_template.toPlainText(),allowed_foreign=self.allowed_foreign.toPlainText(),
+                    url=self.url.text().strip(), model=self.model.currentText().strip(), key=self.key.text(),
                     api_mode=self.api_mode.currentData(), context_tokens=self.context_tokens.value(), hide_readings=self.hide_readings.isChecked(),
                     source=self.source.text().strip() or 'auto', target=self.target.text().strip(),
                     encoding=self.encoding.currentData(), batch_size=self.batch.value(),
@@ -526,6 +561,8 @@ class MainWindow(QMainWindow):
         self.loading_notes = True
         self.notes.setEnabled(work is not None and self.worker is None)
         self.notes.setPlainText(work.notes if work else '')
+        self.glossary.setEnabled(work is not None and self.worker is None)
+        self.glossary.setPlainText(work.glossary if work else '')
         self.instructions.setEnabled(work is not None and self.worker is None)
         self.instructions.setPlainText(work.instructions if work else '')
         self.work_title.setText(work.title if work else ('여러 작품이 선택되었습니다.' if len(ids) > 1 else '작품을 매칭하세요.'))
@@ -547,6 +584,10 @@ class MainWindow(QMainWindow):
             self.status.setText('인물·용어 메모는 5,000자까지 사용할 수 있습니다.')
         self.workspace.works[self.current_work].notes = text
         self.save()
+
+    def glossary_changed(self):
+        if not self.loading_notes and self.current_work in self.workspace.works and self.worker is None:
+            self.workspace.works[self.current_work].glossary = self.glossary.toPlainText(); self.save()
 
     def instructions_changed(self):
         if self.loading_notes or not self.current_work: return
@@ -603,9 +644,21 @@ class MainWindow(QMainWindow):
         task.finished.connect(finished); task.start()
         return task
 
+    def apply_polystrata(self):
+        self.workspace.settings.update(POLYSTRATA)
+        self.load_settings(); self.update_api_hint()
+        self.save()
+        self.api_hint.setText('PolyStrata 권장값 적용: 8080 / 자동 모델 / 0.7 / Thinking OFF / 32768 / 최대 100대사. 서버의 실제 컨텍스트도 확인하세요.')
+
     def update_api_hint(self, *_):
         try:
-            special = mode_for(self.settings()) == 'ja-ko-vn'
+            mode = mode_for(self.settings())
+            self.thinking.setEnabled(mode=='identified' and self.provider.currentData()=='polystrata')
+            for control in (self.streaming,self.input_tokens,self.quality_retries,self.prompt_template,self.allowed_foreign): control.setEnabled(mode=='identified')
+            if mode == 'identified':
+                self.api_hint.setText('고유 ID로 순서와 무관하게 매칭하고 ASS 토큰을 검증합니다. 정상 ID는 저장하고 문제 ID만 문맥과 함께 재번역합니다. 100대사는 상한이며 입력·출력 예산에 따라 조정됩니다. Thinking 제어는 PolyStrata에서만 전송합니다.')
+                return
+            special = mode == 'ja-ko-vn'
             self.batch.setEnabled(True)
             self.api_hint.setText(
                 'ja-ko-vn 전용: 서식으로 쪼개지 않고 대사 전체를 번역합니다. 줄 수가 다르면 그 묶음만 대사별로 처리합니다. '
@@ -640,7 +693,7 @@ class MainWindow(QMainWindow):
         self.api_hint.setText('모델 목록을 가져오고 있습니다…')
         def result(models):
             current = self.model.currentText(); self.model.clear(); self.model.addItems(models)
-            if current: self.model.setCurrentText(current)
+            self.model.setCurrentText(current if current else '')
             self.api_hint.setText(f'{len(models)}개 모델을 확인했습니다. 사용할 모델을 선택하세요.')
             self.models_button.setEnabled(True)
         def failed(message):
@@ -699,11 +752,13 @@ class MainWindow(QMainWindow):
         self.worker.progress.connect(self.job_progress); self.worker.completed.connect(self.job_complete)
         self.worker.error.connect(self.job_error); self.worker.finished.connect(self.job_finished)
         self.run_clock.start(); self.elapsed_label.setVisible(True)
-        self.run_log.clear(); self.log_run_event('전체 번역 시작 · 파일을 확인합니다.')
+        self.metrics_data = {}; self.metrics_label.setText(''); self.run_log.clear(); self.log_run_event('전체 번역 시작 · 파일을 확인합니다.')
         self.show_elapsed_time(); self.elapsed_timer.start()
         self.set_busy(True); self.status.setText('자막 파일을 확인하고 있습니다…'); self.worker.start()
 
     def job_progress(self, data):
+        if 'requests' in data or 'global_total' in data:
+            self.metrics_data.update(data); self.show_metrics()
         if 'index' in data:
             entry = self.workspace.entries[data['index']]
             entry.status = data.get('status', '번역 중'); self.rows[data['index']].setText(2, entry.status)
@@ -711,15 +766,29 @@ class MainWindow(QMainWindow):
         if 'message' in data:
             self.wait_message = f"{data.get('work', '')} · {data['message']}"
             self.status.setText(self.wait_message)
-            self.log_run_event(self.wait_message)
+            if data.get('phase') != 'stream': self.log_run_event(self.wait_message)
         if data.get('phase') in ('request', 'retry'):
             self.request_started = time.monotonic(); self.wait_timer.start()
             self.show_wait_time()
-        elif data.get('phase') == 'validated':
+        elif data.get('phase') in ('validated','review','stream','saving'):
             self.wait_timer.stop(); self.request_started = None
-        if data.get('total'):
+        if data.get('global_total'):
+            self.progress_bar.setValue(int(self.progress_bar.maximum()*data.get('global_done',0)/data['global_total']))
+        elif data.get('total'):
             within = data.get('done', 0) / data['total']
             self.progress_bar.setValue(int(self.progress_bar.maximum() * (data.get('work_index', 1) - 1 + within) / data.get('work_total', 1)))
+
+    def show_metrics(self):
+        d = self.metrics_data
+        completed,total = d.get('global_done',d.get('done',0)),d.get('global_total',d.get('total',0))
+        eta = d.get('eta_seconds')
+        rate = d.get('tokens_per_second')
+        self.metrics_label.setText(
+            f"{completed}/{total} 대사 · {100*completed/total if total else 0:.1f}% · "
+            f"현재 {d.get('first','–')}–{d.get('last','–')} · {d.get('stage','준비')} · "
+            + (f"{rate:.1f} tok/s ({d.get('speed_kind','측정')}) · " if rate is not None else 'tok/s 대기 · ')
+            + ('ETA 추정 '+format_duration(eta) if eta is not None else 'ETA 추정 대기')
+            + f" · 요청 {d.get('requests',0)} / 재시도 {d.get('retries',0)} / 오류 자막 {d.get('errors',0)}")
 
     def show_wait_time(self):
         if self.request_started is not None:
@@ -742,6 +811,7 @@ class MainWindow(QMainWindow):
     def job_complete(self, paths):
         self.wait_timer.stop(); self.request_started = None
         duration = self.finish_run_time()
+        self.metrics_data.update(stage='완료',eta_seconds=0); self.show_metrics()
         self.results = paths; self.progress_bar.setValue(self.progress_bar.maximum())
         self.status.setText(f'완료! 자막 {len(paths)}개 · 총 {duration}. 결과 열기에서 확인하세요.')
         self.log_run_event(self.status.text())
