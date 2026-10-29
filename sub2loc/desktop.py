@@ -25,7 +25,7 @@ from .connection import test_translation
 from .jako import mode_for
 from .engine import Cancelled
 from .timing import RunClock, format_duration
-from .profiles import POLYSTRATA, DEFAULT_TEMPLATE, MANGA_TEMPLATE, LEGACY_TEMPLATE
+from .profiles import POLYSTRATA, DEFAULT_TEMPLATE, MANGA_TEMPLATE, LEGACY_TEMPLATE, template_for
 from .subtitles import FORMATS
 from .workspace import Workspace, Work, default_data_dir, translate_queue, validate_settings
 
@@ -403,6 +403,8 @@ class MainWindow(QMainWindow):
         api_layout.addLayout(form)
         self.format_hint = label('', 'muted'); api_layout.addWidget(self.format_hint)
         api_layout.addWidget(self.use_summary)
+        self.prompt_library_button = button('프롬프트 보관함 · 출처별 하나 선택', self.manage_prompts)
+        api_layout.addWidget(self.prompt_library_button)
         api_layout.addWidget(label('벌룬 TXT: 원문 내보내기 파일을 추가하세요. ID 기반 모드에서 페이지·말풍선 번호를 보존한 TXT로 저장합니다. OCR 의심 문자는 경고만 하며 이미지 확인을 대신하지 않습니다.', 'muted'))
         self.strip_ass_decoration = QCheckBox('ASS 대사 내 색상·강조 태그 제거 (위치·크기 유지)')
         self.strip_ass_decoration.setToolTip('색상 \\c·\\1c–\\4c와 굵게 \\b·기울임 \\i·밑줄 \\u·취소선 \\s만 제거합니다. Style 정의의 기본 색상·서식, 위치·크기·너비·투명도·줄바꿈은 유지합니다. 켜면 기존 ASS 저장분과 별도로 번역합니다.')
@@ -499,6 +501,11 @@ class MainWindow(QMainWindow):
         self.input_tokens.setValue(s.get('input_tokens',20000)); self.quality_retries.setValue(s.get('quality_retries',2))
         template = s.get('prompt_template',DEFAULT_TEMPLATE)
         self.prompt_template.setPlainText(DEFAULT_TEMPLATE if template.strip()==LEGACY_TEMPLATE else template)
+        self.active_prompt_record = None
+        if isinstance(s.get('active_prompt_profile'),dict):
+            from .prompt_library import validate_profile
+            try:self.active_prompt_record=validate_profile(s['active_prompt_profile'])
+            except ValueError:pass
         self.allowed_foreign.setPlainText(s.get('allowed_foreign',''))
         for key, widget in [('url', self.url), ('source', self.source), ('target', self.target), ('output', self.output)]:
             if key in s: widget.setText(str(s[key]))
@@ -511,7 +518,7 @@ class MainWindow(QMainWindow):
         if index >= 0: self.encoding.setCurrentIndex(index)
 
     def settings(self):
-        return dict(run_nonce=self.workspace.settings.get('run_nonce',''),output_format=self.output_format.currentData(),strip_ass_decoration=self.strip_ass_decoration.isChecked(),provider=self.provider.currentData(),temperature=self.temperature.value(),thinking=self.thinking.currentData(),
+        result = dict(run_nonce=self.workspace.settings.get('run_nonce',''),output_format=self.output_format.currentData(),strip_ass_decoration=self.strip_ass_decoration.isChecked(),provider=self.provider.currentData(),temperature=self.temperature.value(),thinking=self.thinking.currentData(),
                     use_summary=self.use_summary.isChecked(),stream=self.streaming.isChecked(),input_tokens=self.input_tokens.value(),quality_retries=self.quality_retries.value(),
                     prompt_template=self.prompt_template.toPlainText(),allowed_foreign=self.allowed_foreign.toPlainText(),
                     url=self.url.text().strip(), model=self.model.currentText().strip(), key=self.key.text(),
@@ -519,9 +526,18 @@ class MainWindow(QMainWindow):
                     source=self.source.text().strip() or 'auto', target=self.target.text().strip(),
                     encoding=self.encoding.currentData(), batch_size=self.batch.value(),
                     max_tokens=self.tokens.value(), timeout=self.timeout.value())
+        active=getattr(self,'active_prompt_record',None)
+        if active and result['prompt_template']==active['anime'] and (active['anime'],active['manga'])!=(DEFAULT_TEMPLATE,MANGA_TEMPLATE):
+            result['manga_prompt_template']=active['manga']
+            result['isolate_prompt_context']=True
+        return result
 
     def save(self):
         settings = self.settings(); settings.pop('key', None); settings['output'] = self.output.text().strip()
+        for key in ('prompt_library','ocr_name_suggestions'):
+            if key in self.workspace.settings:settings[key]=self.workspace.settings[key]
+        active=getattr(self,'active_prompt_record',None)
+        if active and settings['prompt_template']==active['anime']:settings['active_prompt_profile']=active
         self.workspace.settings = settings
         try:
             if self.load_error and self.workspace_path.exists():
@@ -682,6 +698,7 @@ class MainWindow(QMainWindow):
         entry = self.workspace.entries[indices[0]]
         try:
             config = validate_settings(self.settings())
+            config['ocr_name_suggestions']=self.workspace.settings.get('ocr_name_suggestions',False)
             if mode_for(config) != 'identified': raise ValueError('벌룬 OCR 검수는 ID 기반 호출 방식에서 사용하세요.')
             work = self.workspace.works.get(entry.work_id)
             if work:
@@ -691,10 +708,28 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as exc:
             self.status.setText(str(exc)); return
         dialog.exec()
+        if hasattr(dialog,'name_suggestions'):self.workspace.settings['ocr_name_suggestions']=dialog.name_suggestions.isChecked()
         if dialog.new_output:
             entry.output = str(dialog.new_output)
             if entry.output not in self.results: self.results.append(entry.output)
             self.status.setText('OCR 검수 수정본 저장: '+entry.output)
+        self.save()
+
+    def manage_prompts(self):
+        if self.worker is not None or self.background_tasks:return
+        from .prompt_desktop import PromptLibraryDialog
+        current=dict(id='current',name='현재 편집본',anime=self.prompt_template.toPlainText(),
+                     manga=template_for(dict(self.settings(),input_format='balloon')))
+        active=getattr(self,'active_prompt_record',None)
+        if active and active['anime']==current['anime']:current=dict(active)
+        try:dialog=PromptLibraryDialog(self.workspace.settings.get('prompt_library',[]),current,self)
+        except ValueError as exc:self.status.setText(str(exc));return
+        result=dialog.exec()
+        self.workspace.settings['prompt_library']=dialog.saved
+        if result==QDialog.DialogCode.Accepted:
+            self.active_prompt_record=dialog.selected_profile
+            self.prompt_template.setPlainText(dialog.selected_profile['anime'])
+            self.status.setText('선택한 프롬프트만 적용: '+dialog.selected_profile['name'])
         self.save()
 
     def background(self, function, on_result, on_error=None):
@@ -722,6 +757,7 @@ class MainWindow(QMainWindow):
             if not plain and self.strip_ass_decoration.isChecked():
                 self.format_hint.setText('ASS 색상·강조 제거: 대사 내 지정 태그만 제거합니다. 위치·크기·너비·줄바꿈과 Style 정의는 유지하며, 기존 ASS 저장분과 별도로 번역합니다.')
             mode = mode_for(self.settings())
+            self.prompt_library_button.setEnabled(mode=='identified')
             self.use_summary.setEnabled(mode=='identified')
             self.thinking.setEnabled(mode=='identified' and self.provider.currentData()=='polystrata')
             for control in (self.streaming,self.input_tokens,self.quality_retries,self.prompt_template,self.allowed_foreign): control.setEnabled(mode=='identified')
@@ -939,6 +975,7 @@ def main():
     parser.add_argument('--data-dir', type=Path, default=None)
     parser.add_argument('--smoke-test', type=Path, metavar='SCREENSHOT', help='GUI를 열고 스크린샷을 저장한 뒤 종료')
     parser.add_argument('--smoke-ocr-test', type=Path, metavar='SCREENSHOT', help='모의 TXT의 OCR 검수 창을 API 없이 확인')
+    parser.add_argument('--smoke-prompt-test', type=Path, metavar='SCREENSHOT', help='프롬프트 보관함과 출처별 템플릿을 API 없이 확인')
     args = parser.parse_args()
     app = QApplication(sys.argv[:1]); app.setApplicationName('sub2loc'); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
     try:window = MainWindow(args.data_dir)
@@ -947,7 +984,17 @@ def main():
             'EXE 옆 data 폴더에 저장할 수 없습니다. 압축을 풀고 쓰기 가능한 폴더에서 실행하세요. 또는 --data-dir로 저장 위치를 지정하세요.')
         return 2
     window.show()
-    if args.smoke_ocr_test:
+    if args.smoke_prompt_test:
+        from .prompt_desktop import PromptLibraryDialog
+        dialog=PromptLibraryDialog([],dict(id='current',name='현재',anime=DEFAULT_TEMPLATE,manga=MANGA_TEMPLATE),window)
+        dialog.selector.setCurrentIndex(dialog.selector.findData('kone-mybest'));dialog.show()
+        def finish_prompt():
+            args.smoke_prompt_test.parent.mkdir(parents=True,exist_ok=True)
+            valid=dialog.selector.count()==4 and bool(dialog.manga.toPlainText()) and not dialog.checks['symbols'].isChecked()
+            valid=dialog.grab().save(str(args.smoke_prompt_test)) and valid
+            dialog.close();app.exit(0 if valid else 2)
+        QTimer.singleShot(700,finish_prompt)
+    elif args.smoke_ocr_test:
         from .ocr_desktop import OcrReviewDialog
         smoke_temp = tempfile.TemporaryDirectory()
         source = Path(smoke_temp.name)/'book_source.txt'

@@ -21,3 +21,9 @@ with tempfile.TemporaryDirectory() as data:
 if not ocr_screenshot.is_file() or ocr_screenshot.stat().st_size < 1000:
     raise SystemExit('The frozen OCR review window did not render.')
 print('Frozen OCR review dialog and bundled prompt loading passed (no API).')
+prompt_screenshot=screenshot.with_name('windows-prompt-smoke.png')
+with tempfile.TemporaryDirectory() as data:
+    subprocess.run([str(binary),'--data-dir',data,'--smoke-prompt-test',str(prompt_screenshot)],timeout=60,check=True)
+if not prompt_screenshot.is_file() or prompt_screenshot.stat().st_size<1000:
+    raise SystemExit('The frozen prompt library did not render.')
+print('Frozen prompt library and per-source presets passed (no API).')

@@ -166,6 +166,7 @@ def validate_settings(settings):
     if not isinstance(config.get('run_nonce',''),str) or len(config.get('run_nonce',''))>64:
         raise ValueError('재번역 기록 설정을 확인하세요.')
     if type(config.get('use_summary',False)) is not bool:raise ValueError('누적 문맥 요약 설정을 확인하세요.')
+    if type(config.get('isolate_prompt_context',False)) is not bool:raise ValueError('프롬프트 문맥 분리 설정을 확인하세요.')
     output_format(config)
     if type(config.get('strip_ass_decoration',False)) is not bool:
         raise ValueError('ASS 색상·강조 제거 설정이 올바르지 않습니다.')
@@ -194,7 +195,7 @@ def validate_settings(settings):
             raise ValueError('입력 예산 + 최대 출력 + 여유 1024토큰이 컨텍스트 이하여야 합니다.')
         if type(config.get('quality_retries',2)) is not int or not 0 <= config.get('quality_retries',2) <= 3:
             raise ValueError('검수 재번역은 0–3회로 설정하세요.')
-        for key in ('prompt_template','allowed_foreign'):
+        for key in ('prompt_template','manga_prompt_template','allowed_foreign'):
             if not isinstance(config.get(key,''),str) or len(config.get(key,''))>20000:
                 raise ValueError('프롬프트/허용 표기는 20000자 이하의 문자열이어야 합니다.')
         if 'prompt_template' in config and not config['prompt_template'].strip():

@@ -131,6 +131,14 @@ class OcrReviewTests(unittest.TestCase):
         self.assertIsNone(model.calls[0][1]['thinking_enabled'])
         with self.assertRaises(ValueError):self.session.scan(config(input_tokens=256),client=model)
 
+    def test_name_correction_option_is_review_only_and_never_auto_applied(self):
+        model=Model(lambda d:ChatResult('{"suspects":[]}', 'stop'))
+        for enabled in (False,True):
+            self.session.scan(config(ocr_name_suggestions=enabled,notes='名前=이름'),indices=[1],client=model)
+            system=model.calls[-1][2][0]['content']
+            self.assertIn('User permits name/term correction proposals' if enabled else 'normalization to an existing glossary entry is disabled',system)
+            self.assertEqual(self.session.current_translation(1),'고양이가 왔다.')
+
     def test_real_http_controls_and_selected_row_only(self):
         calls=[]
         class Handler(BaseHTTPRequestHandler):

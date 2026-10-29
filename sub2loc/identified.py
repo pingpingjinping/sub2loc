@@ -33,12 +33,14 @@ Copy every ⟪S2L:n⟫ placeholder exactly once in the same order within its sub
 These placeholders include formatting and visual line/space boundaries. Translate the
 whole sentence with context, but keep text on its proper side of each boundary.
 Copy only placeholders present in that item's text; never append an end marker.
-Never emit raw ASS controls, physical line breaks inside text, commentary, or thinking.
+Never emit raw ASS controls, physical line breaks inside text, commentary outside
+the requested translation values, or thinking.
 '''
 PLAIN_PROTOCOL = BASE_PROTOCOL + '''
 Input text is plain dialogue; all subtitle styling and visual line boundaries were
 removed locally. Return one plain-text translation per id. Do not add formatting,
-ASS controls, placeholder markers, physical line breaks, commentary, or thinking.
+ASS controls, placeholder markers, physical line breaks, commentary outside the
+requested translation values, or thinking.
 The app preserves timing locally; never output timestamps or subtitle file markup.'''
 
 
@@ -120,6 +122,7 @@ def _bound(text, size):
 def translate(root, config, files, cancel, progress, client):
     identity = {k: v for k, v in config.items() if k not in ('key', 'api_mode')}
     identity.pop('use_summary',None)  # Keep accepted IDs when enabling context.
+    identity.pop('isolate_prompt_context',None)
     if not config.get('run_nonce'):identity.pop('run_nonce',None)
     # ASS's implicit/default setting must keep existing checkpoints. SRT and SMI
     # share validated plain-text translations; only the local renderer differs.
@@ -129,8 +132,10 @@ def translate(root, config, files, cancel, progress, client):
     simplified = not plain and config.get('strip_ass_decoration', False)
     if not simplified: identity.pop('strip_ass_decoration', None)
     identity['prompt_template'] = template_for(config)
+    identity.pop('manga_prompt_template',None)  # Only the effective prompt binds the cache.
     identity['pipeline'] = 'identified-balloon-v1' if balloon else 'identified-plain-v1' if plain else 'identified-ass-clean-v1' if simplified else 'identified-v1'
     project_key={'work': config.get('work_id') or config['work'], 'mode': identity['pipeline']}
+    if config.get('isolate_prompt_context',False):project_key['prompt']=digest(template_for(config))
     if config.get('run_nonce'):project_key['restart']=config['run_nonce']
     folder = Path(root) / digest(project_key)[:24]
     run_id = digest([identity, [(n, digest(raw.hex())) for n, raw in files]])

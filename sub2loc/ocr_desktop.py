@@ -59,6 +59,10 @@ class OcrReviewDialog(QDialog):
         self.load_button = QPushButton('번역 TXT 불러오기'); self.load_button.clicked.connect(self.choose_translation)
         top.addWidget(self.only_suspects); top.addWidget(self.thinking); top.addWidget(self.scan_button); top.addWidget(self.load_button)
         layout.addLayout(top)
+        self.name_suggestions=QCheckBox('용어집의 기존 이름·용어로 OCR 보정 후보 허용')
+        self.name_suggestions.setChecked(config.get('ocr_name_suggestions') is True)
+        self.name_suggestions.setToolTip('알고 있는 표기를 교정 후보로 제안할 수 있게 합니다. 새 인물을 기존 이름으로 잘못 보정할 수 있으며, 적용은 사용자가 결정합니다.')
+        layout.addWidget(self.name_suggestions)
         splitter = QSplitter()
         self.tree = QTreeWidget(); self.tree.setHeaderLabels(['페이지 / 블록', '상태', '의심 이유'])
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -92,7 +96,7 @@ class OcrReviewDialog(QDialog):
         self.refresh()
 
     def controls(self):
-        return (self.scan_button, self.load_button, self.tree, self.only_suspects, self.candidate,
+        return (self.scan_button, self.load_button, self.tree, self.only_suspects, self.name_suggestions, self.candidate,
                 self.keep_button, self.propose_button, self.translate_button, self.apply_button)
 
     def refresh(self, *_):
@@ -147,7 +151,7 @@ class OcrReviewDialog(QDialog):
         task.finished.connect(finished); self.update_buttons(); task.start()
 
     def review_config(self):
-        return dict(self.config, ocr_thinking=self.thinking.currentData())
+        return dict(self.config, ocr_thinking=self.thinking.currentData(),ocr_name_suggestions=self.name_suggestions.isChecked())
 
     def scan(self):
         config = self.review_config()

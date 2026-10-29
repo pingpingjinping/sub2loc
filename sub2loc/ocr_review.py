@@ -150,6 +150,10 @@ class ReviewSession:
         if any(type(i) is not int or not 0 <= i < len(self.doc.cues) for i in pending):
             raise ValueError('검수할 블록 번호가 올바르지 않습니다.')
         completed = 0
+        if type(config.get('ocr_name_suggestions',False)) is not bool:raise ValueError('OCR 이름 보정 후보 설정을 확인하세요.')
+        name_rule = ('User permits name/term correction proposals using explicitly supplied glossary mappings. Suggest only a supplied Japanese spelling with contextual support, and retain uncertainty; never automatically apply it or force a possible new name to an existing one.'
+                     if config.get('ocr_name_suggestions',False) else
+                     'Name/term normalization to an existing glossary entry is disabled. You may flag suspicious names, but do not propose replacing a name merely because it resembles an existing entry.')
         while pending:
             check()
             group, rows = [], []
@@ -158,7 +162,7 @@ class ReviewSession:
                 c = self.doc.cues[index]
                 row = dict(id=self.wire(c), page=c.page, block=c.block, text=c.text, context=self.neighbors(c))
                 trial = rows+[row]
-                messages = [dict(role='system', content=REVIEW_PROMPT),
+                messages = [dict(role='system', content=REVIEW_PROMPT+'\n'+name_rule),
                             dict(role='user', content=json.dumps(dict(rows=trial, fixed_notes=config.get('notes', '')[:2000]), ensure_ascii=False))]
                 if len(json.dumps(messages, ensure_ascii=False).encode())+128 > budget:
                     if not rows:

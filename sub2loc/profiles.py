@@ -13,6 +13,8 @@ POLYSTRATA = dict(provider='polystrata', api_mode='identified', url='http://127.
 def template_for(config):
     text = config.get('prompt_template', DEFAULT_TEMPLATE).strip()
     if text == LEGACY_TEMPLATE: text = DEFAULT_TEMPLATE
+    if config.get('input_format')=='balloon' and config.get('manga_prompt_template'):
+        return config['manga_prompt_template'].strip()
     if config.get('input_format') == 'balloon' and text == DEFAULT_TEMPLATE:
         return MANGA_TEMPLATE
     return text

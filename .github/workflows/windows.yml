@@ -42,5 +42,6 @@ jobs:
             dist/SHA256SUMS.txt
             dist/windows-smoke.png
             dist/windows-ocr-smoke.png
+            dist/windows-prompt-smoke.png
           if-no-files-found: error
           retention-days: 90
