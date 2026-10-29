@@ -130,6 +130,18 @@ class DesktopTests(unittest.TestCase):
         self.window = MainWindow(self.root / 'appdata'); self.window.show()
         self.addCleanup(self.window.close)
 
+    def test_default_portable_storage_does_not_read_or_migrate_appdata(self):
+        executable=self.root/'portable'/'sub2loc.exe'
+        old=self.root/'appdata'/'sub2loc';old.mkdir(parents=True)
+        (old/'workspace.json').write_text('old data must not be read')
+        with patch('sub2loc.workspace.sys.frozen',True,create=True),patch('sub2loc.workspace.sys.executable',str(executable)),patch.dict(os.environ,LOCALAPPDATA=str(old.parent)):
+            window=MainWindow()
+            self.assertEqual(window.data_dir,executable.parent/'data')
+            self.assertEqual(window.load_error,'')
+            window.close()
+            self.assertTrue((executable.parent/'data'/'workspace.json').is_file())
+            self.assertEqual((old/'workspace.json').read_text(),'old data must not be read')
+
     def wait_for(self, condition, timeout=10):
         deadline = time.monotonic() + timeout
         while not condition():
@@ -196,6 +208,66 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(all('번역'.encode() in Path(p).read_bytes() for p in self.window.results))
         self.assertEqual(len(calls), 2)
         self.assertNotIn('private-test-key', self.window.workspace_path.read_text())
+        QTest.mouseClick(self.window.restart_button, Qt.MouseButton.LeftButton)
+        self.wait_for(lambda: self.window.worker is None)
+        self.assertEqual(len(calls),4)
+        self.assertEqual(json.loads(calls[2]['messages'][1]['content'])['previous_context'],'')
+        nonce=self.window.workspace.settings['run_nonce']
+        self.assertTrue(nonce)
+        QTest.mouseClick(self.window.start_button, Qt.MouseButton.LeftButton)
+        self.wait_for(lambda: self.window.worker is None)
+        self.assertEqual(len(calls),4)
+        self.assertEqual(self.window.workspace.settings['run_nonce'],nonce)
+
+    def test_output_format_choice_persists_and_is_locked_during_translation(self):
+        self.assertEqual(self.window.settings()['output_format'], 'ass')
+        self.assertTrue(self.window.settings()['use_summary'])
+        self.window.use_summary.setChecked(False)
+        self.window.strip_ass_decoration.setChecked(True)
+        self.window.output_format.setCurrentIndex(self.window.output_format.findData('smi'))
+        self.assertFalse(self.window.strip_ass_decoration.isEnabled())
+        self.assertIn('보호 토큰 없이', self.window.format_hint.text())
+        self.window.set_busy(True)
+        self.assertFalse(self.window.output_format.isEnabled())
+        self.window.set_busy(False); self.window.save()
+        restored = MainWindow(self.root / 'appdata')
+        try:
+            self.assertEqual(restored.settings()['output_format'], 'smi')
+            self.assertFalse(restored.settings()['use_summary'])
+            self.assertTrue(restored.settings()['strip_ass_decoration'])
+            restored.output_format.setCurrentIndex(restored.output_format.findData('ass'))
+            self.assertTrue(restored.strip_ass_decoration.isEnabled())
+            self.assertTrue(restored.strip_ass_decoration.isChecked())
+        finally:restored.close()
+
+    def test_native_format_selection_to_http_api_and_srt_smi_exports(self):
+        calls = []
+        class Model(BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                data = json.loads(request['messages'][-1]['content']);calls.append(data)
+                content = '\n'.join(json.dumps(dict(id=r['id'],text='안녕, 반가워요!'),ensure_ascii=False) for r in data['translate'])
+                body = json.dumps({'choices':[{'message':{'content':content},'finish_reason':'stop'}]}).encode()
+                self.send_response(200);self.end_headers();self.wfile.write(body)
+        server = ThreadingHTTPServer(('127.0.0.1',0),Model)
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        self.window.apply_polystrata();self.window.streaming.setChecked(False)
+        self.window.add_paths([self.files / '01.ass'])
+        self.window.workspace.assign([0],Work.manual('Plain API'));self.window.refresh()
+        self.window.url.setText(f'http://127.0.0.1:{server.server_port}/v1')
+        self.window.model.setCurrentText('mock-model');self.window.output.setText(str(self.root/'out'))
+        for fmt in ('srt','smi'):
+            self.window.output_format.setCurrentIndex(self.window.output_format.findData(fmt))
+            QTest.mouseClick(self.window.start_button,Qt.MouseButton.LeftButton)
+            self.wait_for(lambda:self.window.worker is None)
+            self.assertEqual(len(self.window.results),1,self.window.status.text())
+            output=Path(self.window.results[0]);self.assertEqual(output.suffix,'.'+fmt)
+            self.assertIn('안녕, 반가워요!',output.read_text('utf-8-sig'))
+        self.assertEqual(len(calls),1)  # Switching the renderer reuses validated plain text.
+        self.assertNotIn('⟪S2L:',json.dumps(calls,ensure_ascii=False))
+        self.assertEqual((self.files/'01.ass').read_bytes(),SAMPLE)
 
 
 if __name__ == '__main__': unittest.main()

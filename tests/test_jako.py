@@ -162,6 +162,7 @@ class ProbeUiTests(unittest.TestCase):
                 self.assertIn('ミサキ / Misaki', window.reference.toPlainText())
                 window.url.setText(f'http://127.0.0.1:{server.server_port}/v1')
                 window.model.setCurrentText(config()['model'])
+                window.output_format.setCurrentIndex(window.output_format.findData('srt'))
                 self.assertTrue(window.batch.isEnabled())
                 QTest.mouseClick(window.probe_button, Qt.MouseButton.LeftButton)
                 deadline = time.monotonic() + 10
@@ -170,6 +171,7 @@ class ProbeUiTests(unittest.TestCase):
                     QTest.qWait(10)
                 self.assertIn('오늘은 좋은 날씨네요.', window.probe_result.toPlainText())
                 self.assertIn('Completions', window.probe_result.toPlainText())
+                self.assertEqual(window.settings()['output_format'],'srt')
                 window.job_progress(dict(index=0, phase='request', message='대사 요청', done=0, total=2))
                 self.assertIn('응답 대기', window.status.text())
                 self.assertEqual(window.progress_bar.value(), 0)

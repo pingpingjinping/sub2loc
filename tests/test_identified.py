@@ -10,10 +10,10 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from sub2loc.api import Client, ChatResult, RequestError, StreamInterrupted
+from sub2loc.api import Client, ChatResult, RequestError, StreamInterrupted, ThinkingControlError
 from sub2loc.ass import AssDocument, TOKEN
 from sub2loc.engine import Engine, Cancelled
-from sub2loc.identified import parse_rows, project_lock
+from sub2loc.identified import parse_rows, project_lock, ResponseFormatError
 from sub2loc.profiles import POLYSTRATA
 from sub2loc.review import inspect_translation, normalize_interjection
 from sub2loc.workspace import validate_settings, Workspace, Work, translate_queue
@@ -63,11 +63,112 @@ class IdentifiedTests(unittest.TestCase):
 
     def test_repair_issues_do_not_repeat_other_pending_ids(self):
         def limited(m,d,k):
-            if len(m.calls)==1:return ChatResult('','length')
+            if len(m.calls)==1:return ChatResult(reply([dict(id=r['id'],text='태그 삭제') for r in d['translate']]),'length')
             return ChatResult(reply([answer(r) for r in d['translate']]),'stop')
-        model=Model(limited);self.run_model(ass(['猫','犬']),model)
+        model=Model(limited);self.run_model(ass([r'猫{\i1}たち{\i0}',r'犬{\i1}たち{\i0}']),model)
         for data,_,_ in model.calls[1:]:
             self.assertEqual(set(data['repair_issues']),{r['id'] for r in data['translate']})
+
+    def test_pretty_jsonl_and_per_record_fences_support_100_exact_ids(self):
+        for fenced in (False,True):
+            with self.subTest(fenced=fenced),tempfile.TemporaryDirectory() as root:
+                def pretty(m,d,k):
+                    rows=[json.dumps(answer(r),ensure_ascii=False,indent=2) for r in d['translate']]
+                    if fenced: rows=['```json\n'+r+'\n```' for r in rows]
+                    return ChatResult('\n'.join(rows),'stop')
+                model=Model(pretty);out,_=self.run_model(ass(['猫']*100),model,root=root)
+                self.assertEqual(len(model.calls),1);self.assertEqual(len(AssDocument(out[0][1]).cues),100)
+
+    def test_pretty_jsonl_partial_tail_never_discards_complete_records(self):
+        def partial(m,d,k):
+            if len(m.calls)==1:
+                return ChatResult('\n'.join(json.dumps(answer(r),indent=2) for r in d['translate'][:2])+'\n{\n  "id":','length')
+            return ChatResult(reply([answer(r) for r in d['translate']]),'stop')
+        model=Model(partial);self.run_model(ass(['猫','犬','鳥']),model)
+        self.assertEqual([len(c[0]['translate']) for c in model.calls],[3,1])
+
+    def test_comma_separated_complete_id_objects_are_not_lost_after_first(self):
+        def comma(m,d,k):return ChatResult(',\n'.join(json.dumps(answer(r),indent=2) for r in d['translate']),'stop')
+        model=Model(comma);self.run_model(ass(['猫']*50),model)
+        self.assertEqual(len(model.calls),1)
+
+    def test_truncated_pretty_array_salvages_only_complete_elements(self):
+        raw='[\n'+json.dumps({'id':'a','text':'번역'},indent=2)+',\n{"id":"b", "text":'
+        found,_,_=parse_rows(raw,{'a','b'})
+        self.assertEqual(found,{'a':'번역'})
+
+    def test_one_of_50_ids_saves_one_and_stops_before_49_re_request(self):
+        def low(m,d,k):return ChatResult(reply([answer(d['translate'][0])]),'stop')
+        for repairs in (0,2):
+            with self.subTest(repairs=repairs),tempfile.TemporaryDirectory() as root:
+                raw=ass(['猫']*50);model=Model(low);updates=[]
+                with self.assertRaises(ResponseFormatError) as caught:
+                    self.run_model(raw,model,config(quality_retries=repairs),root=root,updates=updates)
+                self.assertEqual(len(model.calls),1);self.assertIn('50개 요청',str(caught.exception))
+                self.assertEqual(updates[-1]['done'],1);self.assertEqual(updates[-1]['errors'],49)
+                self.assertLess(len([d for d in updates if d.get('phase')=='review']),5)
+                recovered=Model();self.run_model(raw,recovered,config(quality_retries=repairs),root=root)
+                self.assertEqual(len(recovered.calls[0][0]['translate']),49)
+                self.assertFalse(any(r['id'].startswith('e000001-') for r in recovered.calls[0][0]['translate']))
+
+    def test_low_id_yield_due_to_known_output_limit_still_recovers_missing_ids(self):
+        def limited(m,d,k):
+            rows=d['translate'][:1] if len(m.calls)==1 else d['translate']
+            return ChatResult(reply([answer(r) for r in rows]),'length' if len(m.calls)==1 else 'stop')
+        model=Model(limited);self.run_model(ass(['猫']*10),model)
+        original=model.calls[0][0]['translate'][0]['id']
+        self.assertTrue(all(r['id']!=original for c in model.calls[1:] for r in c[0]['translate']))
+
+    def test_whole_response_format_failure_stops_once_and_summarizes_instead_of_100_retries(self):
+        def numbered(m,d,k): return ChatResult('\n'.join(f'{i+1:03} | 번역' for i in range(len(d['translate']))),'stop',{'completion_tokens':1200})
+        model=Model(numbered);updates=[]
+        with self.assertRaises(ResponseFormatError) as caught:self.run_model(ass(['猫']*100),model,updates=updates)
+        self.assertEqual(len(model.calls),1)
+        self.assertEqual(caught.exception.diagnostic['usable_rows'],0)
+        self.assertEqual(caught.exception.diagnostic['usage']['completion_tokens'],1200)
+        self.assertIn('001 | 번역',str(caught.exception))
+        self.assertLess(len([d for d in updates if d.get('phase')=='review']),5)
+        self.assertEqual(updates[-1]['errors'],100)
+        self.assertTrue(caught.exception.path.is_file())
+
+    def test_numeric_ids_are_reported_without_guessing_their_opaque_id(self):
+        def numeric(m,d,k): return ChatResult(reply([dict(id=i+1,text='번역') for i,_ in enumerate(d['translate'])]),'stop')
+        model=Model(numeric)
+        with self.assertRaises(ResponseFormatError) as caught:self.run_model(ass(['猫','犬']),model)
+        self.assertEqual(caught.exception.diagnostic['observed_id_types'],{'int':2})
+        self.assertEqual(len(model.calls),1)
+
+    def test_correct_id_wrong_text_key_is_reported_as_schema_failure(self):
+        def wrong_key(m,d,k): return ChatResult(reply([dict(id=r['id'],translation='번역') for r in d['translate']]),'stop')
+        with self.assertRaises(ResponseFormatError) as caught:self.run_model(ass(['猫']),Model(wrong_key))
+        self.assertEqual(caught.exception.diagnostic['matched_ids'],1)
+        self.assertEqual(caught.exception.diagnostic['usable_rows'],0)
+        self.assertIn('translation',caught.exception.diagnostic['response_preview'])
+
+    def test_empty_response_has_finish_and_usage_diagnostic_and_no_retry(self):
+        model=Model(lambda m,d,k:ChatResult('','length',{'completion_tokens':8192},reasoning_characters=3000))
+        with self.assertRaises(ResponseFormatError) as caught:self.run_model(ass(['猫']),model)
+        self.assertEqual(len(model.calls),1)
+        self.assertEqual(caught.exception.diagnostic['finish_reason'],'length')
+        self.assertIn('본문이 비어',str(caught.exception));self.assertEqual(caught.exception.diagnostic['reasoning_characters'],3000)
+
+    def test_diagnostic_redacts_api_key_in_preview_and_file(self):
+        secret='PRIVATE-API-CREDENTIAL'
+        model=Model(lambda m,d,k:ChatResult(secret+' '+('본문'*5000)+secret,'stop'))
+        with self.assertRaises(ResponseFormatError) as caught:self.run_model(ass(['猫']),model,config(key=secret))
+        self.assertNotIn(secret,str(caught.exception));self.assertNotIn(secret,caught.exception.path.read_text('utf-8'))
+        self.assertLess(len(caught.exception.diagnostic['response_preview']),2450)
+        self.assertNotIn('key',caught.exception.diagnostic)
+
+    def test_whole_format_failure_preserves_previous_validated_ids_for_resume(self):
+        def some(m,d,k):
+            if len(m.calls)==1:return ChatResult(reply([answer(r) for r in d['translate'][:2]]),'stop')
+            return ChatResult('003 | 번역','stop')
+        raw=ass(['猫','犬','鳥']);model=Model(some)
+        with self.assertRaises(ResponseFormatError):self.run_model(raw,model)
+        recovered=Model();self.run_model(raw,recovered)
+        self.assertEqual(len(recovered.calls[0][0]['translate']),1)
+        self.assertTrue(recovered.calls[0][0]['translate'][0]['id'].startswith('e000003-'))
 
     def test_reordered_output_maps_by_id_and_preserves_every_ass_field(self):
         raw=ass([r'{\i1}一行\N二行\h次{\i0}',r'{\pos(10,20)}看板',r'{\p1}m 0 0 l 2 3{\p0}'])
@@ -103,9 +204,9 @@ class IdentifiedTests(unittest.TestCase):
     def test_renumbered_unknown_id_never_uses_positional_fallback(self):
         def renamed(m,d,k): return ChatResult(reply([dict(id='001',text='오류')]),'stop')
         model=Model(renamed)
-        with self.assertRaisesRegex(ValueError,'ID/ASS'):
+        with self.assertRaisesRegex(ResponseFormatError,'자동 재요청'):
             self.run_model(ass(['猫']),model)
-        self.assertEqual(len(model.calls),3)
+        self.assertEqual(len(model.calls),1)
         saved=json.loads(next(Path(self.root).glob('*/runs/*.json')).read_text())
         self.assertEqual(saved['files']['01.ass'],{})
 
@@ -114,7 +215,7 @@ class IdentifiedTests(unittest.TestCase):
             rows=[answer(r) for r in d['translate']]
             if len(m.calls)==1: rows[1]['text']='태그 삭제'
             return ChatResult(reply(rows),'stop')
-        model=Model(broken); self.run_model(ass(['猫',r'{\i1}犬{\i0}']),model)
+        model=Model(broken); self.run_model(ass(['猫',r'犬{\i1}たち{\i0}']),model)
         self.assertEqual([len(c[0]['translate']) for c in model.calls],[2,1])
 
     def test_foreign_script_is_retranslated_but_interjection_is_safely_normalized(self):
@@ -176,7 +277,7 @@ class IdentifiedTests(unittest.TestCase):
 
     def test_generic_identified_provider_never_sends_thinking_extension(self):
         model=Model(); self.run_model(ass(['猫']),model,config(provider='openai',model='other'))
-        self.assertIsNone(model.calls[0][1]['reasoning_effort'])
+        self.assertIsNone(model.calls[0][1]['reasoning_effort']);self.assertIsNone(model.calls[0][1]['thinking_enabled'])
 
     def test_server_context_error_adjusts_budget_and_auth_failure_is_not_retried(self):
         def overflow(m,d,k):
@@ -248,7 +349,7 @@ class IdentifiedTests(unittest.TestCase):
 
 class HttpTests(unittest.TestCase):
     def setUp(self):
-        self.seen=[]; self.structured=False; self.cut=False; owner=self
+        self.seen=[]; self.structured=False; self.cut=False; self.reasoning='비공개 생각'; owner=self
         class Server(BaseHTTPRequestHandler):
             def log_message(self,*args): pass
             def do_GET(self):
@@ -262,16 +363,19 @@ class HttpTests(unittest.TestCase):
                 content='정답'
                 if owner.structured:
                     rows=payload(d['messages'])['translate']
-                    selected=rows[1:] if len(owner.seen)==1 else rows
+                    selected=rows[1:] if len(owner.seen)==1 and len(rows)>1 else rows
                     content=reply([answer(r) for r in selected])
                 if not d['stream']:
                     self.wfile.write(json.dumps({'choices':[{'message':{'content':'정답'},'finish_reason':'stop'}],'usage':{'completion_tokens':2}}).encode());return
-                for obj in ({'choices':[{'delta':{'reasoning_content':'비공개 생각'}}]},
+                for obj in ({'choices':[{'delta':{'reasoning_content':owner.reasoning}}]},
                             {'choices':[{'delta':{'content':content}}]},
                             {'choices':[{'delta':{},'finish_reason':'stop'}],'usage':{'completion_tokens':2},'timings':{'predicted_per_second':88.5}}):
                     if owner.cut and obj.get('usage'): continue
-                    self.wfile.write(('data: '+json.dumps(obj,ensure_ascii=False)+'\r\n\r\n').encode());self.wfile.flush()
-                self.wfile.write(b'data: [DONE]\n\n')
+                    try:
+                        self.wfile.write(('data: '+json.dumps(obj,ensure_ascii=False)+'\r\n\r\n').encode());self.wfile.flush()
+                    except OSError:return
+                try:self.wfile.write(b'data: [DONE]\n\n')
+                except OSError:pass
         self.server=ThreadingHTTPServer(('127.0.0.1',0),Server)
         threading.Thread(target=self.server.serve_forever,daemon=True).start()
         self.addCleanup(self.server.server_close);self.addCleanup(self.server.shutdown)
@@ -279,6 +383,7 @@ class HttpTests(unittest.TestCase):
     def test_sse_multibyte_usage_reasoning_separation_and_supported_payload(self):
         events=[];result=self.client.chat([],max_tokens=500,temperature=.7,stream=True,reasoning_effort='none',on_event=lambda **d:events.append(d))
         self.assertEqual(result.content,'정답');self.assertEqual(result.usage['completion_tokens'],2)
+        self.assertEqual(result.reasoning_characters,len('비공개 생각'))
         self.assertEqual(result.timings['predicted_per_second'],88.5)
         self.assertEqual(set(self.seen[0]),{'model','messages','temperature','max_tokens','stream','reasoning_effort'})
         self.assertEqual(self.seen[0]['reasoning_effort'],'none')
@@ -286,6 +391,35 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.client.discover()['id'],'gemma')
         self.assertEqual(self.client.chat([],max_tokens=500,temperature=.7).content,'정답')
         self.assertNotIn('reasoning_effort',self.seen[0])
+
+    def test_polystrata_off_payload_explicitly_disables_template_thinking(self):
+        self.structured=True
+        with tempfile.TemporaryDirectory() as root:
+            Engine(Path(root)).translate(config(url=self.client.url),[('01.ass',ass(['猫']))])
+        self.assertEqual(self.seen[0]['reasoning_effort'],'none')
+        self.assertEqual(self.seen[0]['chat_template_kwargs'],{'enable_thinking':False})
+
+    def test_off_ignored_by_server_stops_stream_early_without_retry(self):
+        self.reasoning='장시간 생각을 생성합니다 '*30;self.structured=True
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(ThinkingControlError) as caught:
+                Engine(Path(root)).translate(config(url=self.client.url),[('01.ass',ass(['猫']))])
+            self.assertEqual(len(self.seen),1);self.assertFalse(caught.exception.retryable)
+            self.assertFalse(list(Path(root).glob('*/runs/*.json')))
+            self.assertNotIn(self.reasoning,str(caught.exception))
+
+    def test_server_default_and_generic_provider_do_not_force_thinking_controls(self):
+        self.reasoning='길게 생각하는 서버 기본값 '*30;self.structured=True
+        for override in (dict(thinking='server'),dict(provider='openai',model='other')):
+            with self.subTest(override=override),tempfile.TemporaryDirectory() as root:
+                Engine(Path(root)).translate(config(url=self.client.url,**override),[('01.ass',ass(['猫']))])
+                self.assertNotIn('reasoning_effort',self.seen[-1]);self.assertNotIn('chat_template_kwargs',self.seen[-1])
+
+    def test_real_http_plain_response_stops_with_diagnostic_after_one_request(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(ResponseFormatError) as caught:
+                Engine(Path(root)).translate(config(url=self.client.url),[('01.ass',ass(['猫','犬']))])
+            self.assertEqual(len(self.seen),1);self.assertEqual(caught.exception.diagnostic['response_preview'],'정답')
 
     def test_real_streaming_pipeline_auto_model_and_targeted_repair(self):
         self.structured=True
@@ -331,6 +465,17 @@ except ImportError: QT=False
 class UiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls): cls.app=QApplication.instance() or QApplication([])
+    def test_format_failure_preview_is_copyable_in_existing_error_panel(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as root:
+            model=Model(lambda m,d,k:ChatResult('001 | 실제 응답','stop'))
+            try:Engine(Path(root)/'engine').translate(config(),[('01.ass',ass(['猫']))],client=model)
+            except ResponseFormatError as issue:message=str(issue)
+            w=MainWindow(Path(root)/'ui');w.worker=SimpleNamespace(cancel=threading.Event());w.job_error(message)
+            self.assertIn('001 | 실제 응답',w.probe_result.toPlainText())
+            w.copy_result_button.click();self.assertEqual(QApplication.clipboard().text(),message)
+            w.worker=None;w.close()
+
     def test_preset_editable_template_persistence_and_live_metrics(self):
         with tempfile.TemporaryDirectory() as folder:
             w=MainWindow(Path(folder));w.apply_polystrata()

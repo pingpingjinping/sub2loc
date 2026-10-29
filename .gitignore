@@ -6,3 +6,4 @@ dist/
 .venv/
 .sub2loc/
 .env
+data/

@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 import threading
-from .ass import AssDocument
+from .subtitles import document_for, output_format, output_name
 from .api import Client, ApiError, OutputLimitError
 from .jako import mode_for, PromptError
 from .chunks import choose_end, translate_adaptive
@@ -79,9 +79,16 @@ class Engine:
             self.lock.release()
 
     def _translate(self, config, files, cancel, progress, client):
+        txt=[Path(n).suffix.lower()=='.txt' for n,_ in files]
+        if any(txt):
+            if not all(txt):raise ValueError('ASS와 벌룬 TXT는 목록을 나눠 실행하세요.')
+            if mode_for(config)!='identified':raise ValueError('벌룬 TXT는 ID 기반 자막 번역 모드를 선택하세요.')
+            config=dict(config,input_format='balloon')
         client = client or Client(config['url'], config['model'], config.get('key', ''),
                                   config['timeout'], config['max_tokens'], temperature=config.get('temperature'))
         mode = mode_for(config)
+        subtitle_format = output_format(config)
+        simplified = subtitle_format == 'ass' and config.get('strip_ass_decoration', False)
         self.last_review = []
         if mode == 'identified':
             if not config.get('model'):
@@ -96,6 +103,9 @@ class Engine:
             outputs, context, self.last_review = translate(self.root, config, files, cancel, progress, client)
             return outputs, context
         identity = {k: v for k, v in config.items() if k not in ('key', 'api_mode')}
+        if not config.get('run_nonce'):identity.pop('run_nonce',None)
+        if subtitle_format == 'ass': identity.pop('output_format',None)
+        if not simplified: identity.pop('strip_ass_decoration',None)
         # New chat-only controls must not invalidate unchanged legacy checkpoints.
         for key in ('provider','stream','thinking','input_tokens','quality_retries','prompt_template','allowed_foreign'):
             identity.pop(key,None)
@@ -113,6 +123,12 @@ class Engine:
         project_key = config.get('work_id') or config['work']
         if mode == 'ja-ko-vn':
             project_key = {'work': project_key, 'mode': 'ja-ko-vn-v3'}
+        if subtitle_format != 'ass':
+            project_key = {'work': project_key, 'subtitle_mode': 'plain-v1'}
+        elif simplified:
+            project_key = {'work': project_key, 'subtitle_mode': 'ass-clean-v1'}
+        if config.get('run_nonce'):
+            project_key={'work':project_key,'restart':config['run_nonce']}
         project_id = digest(project_key)[:24]
         folder = self.root / project_id
         project_path = folder / 'project.json'
@@ -123,7 +139,9 @@ class Engine:
             'recent_pairs': project.get('recent_pairs', [])}
         outputs = [(item['name'], bytes.fromhex(item['hex'])) for item in state['outputs']]
         # Validate every file before making the first API request.
-        documents = [AssDocument(raw, config['encoding'], hide_readings=config.get('hide_readings', False)) for _, raw in files]
+        documents = [document_for(raw, config) for _, raw in files]
+        if subtitle_format != 'ass':
+            progress(phase='preflight',message=f'{subtitle_format.upper()} 일반 자막 · 서식 없이 대사만 번역합니다')
         for (name, _), doc in zip(files, documents):
             if doc.reading_count:
                 action = '숨김' if config.get('hide_readings', False) else '유지'
@@ -181,6 +199,10 @@ class Engine:
                                for c in cues[max(0, start - 2):start] + cues[end:end + 2]],
                            'translate': [{'id': c.id, 'speaker': c.speaker, 'style': c.style, 'text': c.text} for c in batch]}
                 system = SYSTEM
+                if subtitle_format != 'ass':
+                    system = SYSTEM.replace('anime ASS subtitles','anime plain-text subtitles')
+                    system = system.replace('Preserve all ⟪S2L:n⟫ placeholders\nEXACTLY, once each, in their original order within each line. Do not add ASS markup, newlines, or commentary.\nTranslate all visible text including signs and songs. Drawing commands are already protected.',
+                        'All styling and drawing commands were removed locally. Return plain dialogue only;\nnever add formatting, placeholders, newlines, or commentary. Timing is managed by the app.\nTranslate all visible text including signs and songs.')
                 if config.get('instructions'):
                     system += '\nUser-configured translation style preferences (keep required IDs and ASS controls unchanged):\n' + config['instructions']
                 messages = [{'role': 'system', 'content': system},
@@ -223,9 +245,9 @@ class Engine:
                          done=sum(len(d.cues) for d in documents[:file_index]) + end, total=total,
                          message=f'{name}: {end} / {len(cues)} 대사 검증·저장 완료')
             output = document.render(state['translations'])
-            output_name = Path(name).stem + '.translated.ass'
-            outputs.append((output_name, output))
-            state['outputs'].append({'name': output_name, 'hex': output.hex()})
+            result_name = output_name(name, config)
+            outputs.append((result_name, output))
+            state['outputs'].append({'name': result_name, 'hex': output.hex()})
             state['file'], state['offset'], state['translations'] = file_index + 1, 0, {}
             atomic_json(run_path, state)
         # Reopening an older completed run must not roll project continuity backward.

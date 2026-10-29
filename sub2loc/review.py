@@ -14,8 +14,15 @@ def normalize_interjection(source, target):
 
 
 def structure_issues(cue,text):
+    if not TOKEN.sub('',text).strip():return ['빈 번역']
+    if getattr(cue,'plain',False):
+        try:cue.restore(text)
+        except ValueError as exc:return [str(exc)]
+        return []
+    expected=[f'⟪S2L:{i}⟫' for i in range(len(cue.protected))]
+    if TOKEN.findall(text)!=expected:return ['ASS 보호 토큰의 누락·중복·순서 변경']
     try: cue.restore(text)
-    except ValueError: return ['ASS 태그·줄바꿈 구조 또는 빈 번역']
+    except ValueError:return ['번역문에 새 ASS 제어문자 또는 실제 개행 삽입']
     breaks = set(); drawing = False
     for i,control in enumerate(cue.protected):
         if not drawing and control in (r'\N',r'\n'): breaks.add(f'⟪S2L:{i}⟫')

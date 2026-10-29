@@ -2,16 +2,17 @@
 from dataclasses import asdict, dataclass, field
 import json
 import math
-import time
 import os
 from pathlib import Path
 import re
 import threading
+import sys
 from typing import Callable
-from .ass import AssDocument
+from .subtitles import document_for, output_format
 from .api import base_url, OutputLimitError
 from .jako import mode_for
 from .engine import Engine, Cancelled, atomic_json, digest
+from .timing import ThroughputETA
 
 
 def natural_key(value):
@@ -19,9 +20,10 @@ def natural_key(value):
 
 
 def default_data_dir():
-    if os.name == 'nt':
-        return Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local')) / 'sub2loc'
-    return Path.home() / '.sub2loc'
+    # Frozen applications must use the executable's location, never cwd or the
+    # PyInstaller extraction/runtime directory. Source runs use the repo root.
+    root = Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else Path(__file__).resolve().parents[1]
+    return root / 'data'
 
 
 @dataclass
@@ -50,6 +52,7 @@ class Entry:
     path: str
     work_id: str = ''
     status: str = '미매칭'
+    output: str = ''
 
 
 @dataclass
@@ -89,8 +92,8 @@ class Workspace:
             path = Path(value)
             if path.is_dir():
                 for folder, _, names in os.walk(path, followlinks=False, onerror=lambda e: errors.append(str(e))):
-                    found.extend(Path(folder) / n for n in names if n.lower().endswith('.ass'))
-            elif path.is_file() and path.suffix.lower() == '.ass':
+                    found.extend(Path(folder) / n for n in names if n.lower().endswith(('.ass', '_source.txt')))
+            elif path.is_file() and path.suffix.lower() in ('.ass','.txt'):
                 found.append(path)
             else:
                 errors.append(f'ASS 파일 또는 폴더가 아닙니다: {path}')
@@ -98,7 +101,7 @@ class Workspace:
         count = 0
         for path in sorted(found, key=natural_key):
             # Never import our own generated outputs recursively.
-            if path.name.lower().endswith('.translated.ass'):
+            if path.name.lower().endswith(('.translated.ass','.translated.txt')):
                 continue
             resolved = str(path.resolve())
             if os.path.normcase(resolved) not in existing:
@@ -151,14 +154,22 @@ def write_result(path, raw):
         except FileExistsError:
             if candidate.read_bytes() == raw:
                 return candidate
-            # Keep .translated.ass suffix so recursive import can filter outputs.
-            base = path.name.removesuffix('.translated.ass')
-            candidate = path.with_name(f'{base} ({n + 1}).translated.ass')
+            # Keep the selected output extension and generated-file marker.
+            suffix = '.translated' + path.suffix
+            base = path.name.removesuffix(suffix)
+            candidate = path.with_name(f'{base} ({n + 1}){suffix}')
     raise ValueError('동일 이름의 결과 파일이 너무 많습니다.')
 
 
 def validate_settings(settings):
     config = dict(settings)
+    if not isinstance(config.get('run_nonce',''),str) or len(config.get('run_nonce',''))>64:
+        raise ValueError('재번역 기록 설정을 확인하세요.')
+    if type(config.get('use_summary',False)) is not bool:raise ValueError('누적 문맥 요약 설정을 확인하세요.')
+    if type(config.get('isolate_prompt_context',False)) is not bool:raise ValueError('프롬프트 문맥 분리 설정을 확인하세요.')
+    output_format(config)
+    if type(config.get('strip_ass_decoration',False)) is not bool:
+        raise ValueError('ASS 색상·강조 제거 설정이 올바르지 않습니다.')
     config['url'] = base_url(config.get('url', ''))
     if (not config.get('model', '').strip() and config.get('provider') != 'polystrata') or not config.get('target', '').strip():
         raise ValueError('모델명과 번역 언어를 입력하세요.')
@@ -184,7 +195,7 @@ def validate_settings(settings):
             raise ValueError('입력 예산 + 최대 출력 + 여유 1024토큰이 컨텍스트 이하여야 합니다.')
         if type(config.get('quality_retries',2)) is not int or not 0 <= config.get('quality_retries',2) <= 3:
             raise ValueError('검수 재번역은 0–3회로 설정하세요.')
-        for key in ('prompt_template','allowed_foreign'):
+        for key in ('prompt_template','manga_prompt_template','allowed_foreign'):
             if not isinstance(config.get(key,''),str) or len(config.get(key,''))>20000:
                 raise ValueError('프롬프트/허용 표기는 20000자 이하의 문자열이어야 합니다.')
         if 'prompt_template' in config and not config['prompt_template'].strip():
@@ -207,7 +218,7 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             if not path.is_file() or not 0 < path.stat().st_size <= 4 * 1024 * 1024:
                 raise ValueError(f'파일이 없거나 크기가 4MB를 넘습니다: {path.name}')
             raw = path.read_bytes()
-            AssDocument(raw, settings['encoding'])
+            document_for(raw, settings, path.name)
             name = path.stem
             names[name.casefold()] = names.get(name.casefold(), 0) + 1
             files.append((path, raw))
@@ -216,12 +227,12 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             stem = path.stem[:160]
             if names[path.stem.casefold()] > 1:
                 stem += '-' + digest(str(path))[:8]
-            targets.append(folder / (stem + '.translated.ass'))
+            targets.append(folder / (stem + '.translated.' + ('txt' if path.suffix.lower()=='.txt' else output_format(settings))))
         plans.append((work, entries, files, targets))
     engine, results = Engine(Path(root) / 'translations'), []
-    queue_total = sum(len(AssDocument(raw,settings['encoding'],hide_readings=settings.get('hide_readings',False)).cues) for _,_,source,_ in plans for _,raw in source)
+    queue_total = sum(len(document_for(raw,settings,str(path)).cues) for _,_,source,_ in plans for path,raw in source)
     prior_done = 0; prior_metrics = dict(requests=0,retries=0,errors=0)
-    queue_started = time.monotonic(); queue_new_done = 0; last_done = 0
+    queue_eta = ThroughputETA()
     for work_index, (work, entries, source, targets) in enumerate(plans):
         if cancel.is_set():
             raise Cancelled('중단했습니다. 같은 목록·설정으로 다시 시작하면 이어서 처리합니다.')
@@ -237,19 +248,14 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
         mapping = {name: index for (name, _), (index, _) in zip(files, entries)}
         work_done = [0]; work_metrics = dict(requests=0,retries=0,errors=0)
         def report(**data):
-            nonlocal queue_new_done, last_done
             work_done[0] = data.get('done',work_done[0])
             data['global_done'] = prior_done + work_done[0]
             data['global_total'] = queue_total
-            if data.get('phase') == 'validated':
-                queue_new_done += max(0,data['global_done']-last_done)
-            last_done = data['global_done']
             for key in work_metrics:
                 if key in data:
                     work_metrics[key] = data[key]
                     data[key] += prior_metrics[key]
-            if queue_new_done:
-                data['eta_seconds'] = (time.monotonic()-queue_started)/queue_new_done*(queue_total-data['global_done'])
+            data.update(queue_eta.update(data.get('phase'),data['global_done'],queue_total))
             data.update(work=work.title, work_index=work_index + 1, work_total=len(plans))
             if 'file' in data:
                 data['index'] = mapping[data['file']]
@@ -272,7 +278,7 @@ def translate_queue(workspace: Workspace, settings, root, output_root, cancel=No
             if file_review:
                 atomic_json(saved.with_suffix('.review.json'), {'file': saved.name, 'mechanical_checks_only': True, 'items': file_review})
             progress(index=index, status='완료', output=str(saved), work=work.title)
-        prior_done += sum(len(AssDocument(raw,settings['encoding'],hide_readings=settings.get('hide_readings',False)).cues) for _,raw in source)
+        prior_done += sum(len(document_for(raw,settings,str(path)).cues) for path,raw in source)
         for key in prior_metrics: prior_metrics[key] += work_metrics[key]
         # The engine's project file remains the canonical continuity checkpoint.
         atomic_json(targets[0].parent / 'context.json', {'work': work.title, 'id': work.id, 'context': context})

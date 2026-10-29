@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 import threading
 import time
+import tempfile
+import uuid
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
@@ -23,7 +25,8 @@ from .connection import test_translation
 from .jako import mode_for
 from .engine import Cancelled
 from .timing import RunClock, format_duration
-from .profiles import POLYSTRATA, DEFAULT_TEMPLATE
+from .profiles import POLYSTRATA, DEFAULT_TEMPLATE, MANGA_TEMPLATE, LEGACY_TEMPLATE, template_for
+from .subtitles import FORMATS
 from .workspace import Workspace, Work, default_data_dir, translate_queue, validate_settings
 
 STYLE = '''
@@ -125,6 +128,7 @@ class MatchDialog(QDialog):
         self.tabs = QTabWidget()
         online = QWidget(); online_layout = QVBoxLayout(online)
         search_row = QHBoxLayout()
+        self.media_type = QComboBox();self.media_type.addItem("애니메이션","ANIME");self.media_type.addItem("만화","MANGA");online_layout.addWidget(self.media_type)
         self.query = QLineEdit(initial); self.query.setPlaceholderText('일본어·영문·로마자 작품명')
         self.query.setMaxLength(200); self.query.returnPressed.connect(self.search)
         self.search_button = button('검색', self.search, True)
@@ -184,7 +188,7 @@ class MatchDialog(QDialog):
         self.search_button.setEnabled(False)
         self.hint.setText('작품을 검색하고 있습니다…')
         self.results.clear()
-        self.task = Task(lambda: self.catalog.search(query), self)
+        self.task = Task(lambda: self.catalog.search(query) if self.media_type.currentData()=="ANIME" else self.catalog.search(query,media_type="MANGA"), self)
         self.task.result.connect(self.search_results)
         self.task.error.connect(self.hint.setText)
         self.task.finished.connect(self.search_finished)
@@ -258,6 +262,9 @@ class MainWindow(QMainWindow):
     def __init__(self, data_dir=None):
         super().__init__()
         self.data_dir = Path(data_dir or default_data_dir())
+        self.data_dir.mkdir(parents=True,exist_ok=True)
+        # Fail at startup if this installation cannot store its own data.
+        with tempfile.TemporaryFile(dir=self.data_dir):pass
         self.workspace_path = self.data_dir / 'workspace.json'
         self.load_error = ''
         try:
@@ -317,7 +324,9 @@ class MainWindow(QMainWindow):
         self.up = button('↑ 위로', lambda: self.move_selected(-1))
         self.down = button('↓ 아래로', lambda: self.move_selected(1))
         self.unmatch = button('매칭 해제', self.clear_match)
+        self.ocr_button = button('벌룬 OCR 검수', self.review_ocr)
         row_actions.addWidget(self.up); row_actions.addWidget(self.down); row_actions.addStretch(); row_actions.addWidget(self.unmatch)
+        row_actions.addWidget(self.ocr_button)
         left_layout.addLayout(row_actions)
         left_layout.addWidget(label('폴더 행을 선택하면 안의 자막 전체에 적용됩니다. 같은 작품은 표시된 파일 순서로 처리합니다.', 'muted'))
         splitter.addWidget(left)
@@ -356,6 +365,9 @@ class MainWindow(QMainWindow):
         self.provider = QComboBox()
         self.provider.addItem('일반 OpenAI 호환 / LM Studio', 'openai')
         self.provider.addItem('PolyStrata', 'polystrata')
+        self.output_format = QComboBox()
+        for text, value in FORMATS: self.output_format.addItem(text, value)
+        self.output_format.setToolTip('번역 시작 전에 선택하세요. SRT·SMI는 서식을 제거한 대사만 번역하고 원본 시간을 붙입니다. ASS 저장분과 별도로 처리합니다.')
         self.preset_button = button('PolyStrata · Gemma 4 권장값 적용', self.apply_polystrata)
         api_layout.addWidget(self.preset_button)
         self.url = QLineEdit(); self.url.setPlaceholderText('예: http://127.0.0.1:8080/v1')
@@ -377,15 +389,26 @@ class MainWindow(QMainWindow):
         self.timeout = QSpinBox(); self.timeout.setRange(5, 1800); self.timeout.setValue(180); self.timeout.setSuffix(' 초')
         self.temperature = QDoubleSpinBox(); self.temperature.setRange(0, 2); self.temperature.setSingleStep(0.1); self.temperature.setValue(0.2)
         self.thinking = QComboBox()
-        for title,value in [('OFF', 'none'),('서버 기본값', 'server'),('Low','low'),('Medium','medium'),('High','high')]: self.thinking.addItem(title,value)
+        for title,value in [('OFF', 'none'),('서버 기본값 · OFF 미지정', 'server'),('Low','low'),('Medium','medium'),('High','high')]: self.thinking.addItem(title,value)
+        self.thinking.setToolTip('서버 기본값은 OFF 지시를 보내지 않습니다. 웹 채팅의 OFF가 외부 API와 공유되지 않을 수 있으므로 끄려면 OFF를 직접 선택하세요.')
         self.streaming = QCheckBox('스트리밍 응답 받기')
+        self.use_summary = QCheckBox('이전 대사 누적 요약 사용')
+        self.use_summary.setToolTip('ID 기반 모드에서 완료된 앞 대사를 짧게 누적 요약해 다음 묶음에 전달합니다. 추가 API 요청과 시간이 필요하며 요약도 틀릴 수 있습니다. 요약 실패 시 본 번역은 계속합니다.')
         self.input_tokens = QSpinBox(); self.input_tokens.setRange(256,131072); self.input_tokens.setValue(20000); self.input_tokens.setSingleStep(1024)
         self.quality_retries = QSpinBox(); self.quality_retries.setRange(0,3); self.quality_retries.setValue(2)
         self.prompt_template = QPlainTextEdit(DEFAULT_TEMPLATE); self.prompt_template.setMinimumHeight(150)
         self.allowed_foreign = QPlainTextEdit(); self.allowed_foreign.setMaximumHeight(70); self.allowed_foreign.setPlaceholderText('자동 검수에서 허용할 일본어·한자 표기 · 한 줄에 하나')
-        for text, widget in [('API 제공자',self.provider), ('API 기본 주소', self.url), ('모델', self.model), ('호출 방식', self.api_mode), ('API 키', self.key), ('Temperature',self.temperature), ('Thinking',self.thinking), ('응답 방식',self.streaming)]:
+        for text, widget in [('저장 형식',self.output_format), ('API 제공자',self.provider), ('API 기본 주소', self.url), ('모델', self.model), ('호출 방식', self.api_mode), ('API 키', self.key), ('Temperature',self.temperature), ('Thinking',self.thinking), ('응답 방식',self.streaming)]:
             form.addRow(text, widget)
         api_layout.addLayout(form)
+        self.format_hint = label('', 'muted'); api_layout.addWidget(self.format_hint)
+        api_layout.addWidget(self.use_summary)
+        self.prompt_library_button = button('프롬프트 보관함 · 출처별 하나 선택', self.manage_prompts)
+        api_layout.addWidget(self.prompt_library_button)
+        api_layout.addWidget(label('벌룬 TXT: 원문 내보내기 파일을 추가하세요. ID 기반 모드에서 페이지·말풍선 번호를 보존한 TXT로 저장합니다. OCR 의심 문자는 경고만 하며 이미지 확인을 대신하지 않습니다.', 'muted'))
+        self.strip_ass_decoration = QCheckBox('ASS 대사 내 색상·강조 태그 제거 (위치·크기 유지)')
+        self.strip_ass_decoration.setToolTip('색상 \\c·\\1c–\\4c와 굵게 \\b·기울임 \\i·밑줄 \\u·취소선 \\s만 제거합니다. Style 정의의 기본 색상·서식, 위치·크기·너비·투명도·줄바꿈은 유지합니다. 켜면 기존 ASS 저장분과 별도로 번역합니다.')
+        api_layout.addWidget(self.strip_ass_decoration)
         self.models_button = button('연결 확인 · 모델 조회', self.fetch_models)
         api_layout.addWidget(self.models_button)
         self.probe_button = button('짧은 번역 테스트', self.probe_connection)
@@ -406,6 +429,11 @@ class MainWindow(QMainWindow):
         advanced_form.addRow('입력 토큰 예산',self.input_tokens)
         advanced_form.addRow('문제 ID 재번역 횟수',self.quality_retries)
         advanced_form.addRow('번역 프롬프트',self.prompt_template)
+        presets = QWidget(); preset_row = QHBoxLayout(presets); preset_row.setContentsMargins(0,0,0,0)
+        self.anime_prompt_button = button('애니 기본 프롬프트', lambda:self.prompt_template.setPlainText(DEFAULT_TEMPLATE))
+        self.manga_prompt_button = button('만화 기본 프롬프트', lambda:self.prompt_template.setPlainText(MANGA_TEMPLATE))
+        preset_row.addWidget(self.anime_prompt_button); preset_row.addWidget(self.manga_prompt_button)
+        advanced_form.addRow('템플릿 적용', presets)
         advanced_form.addRow('허용 문자 표기',self.allowed_foreign)
         for text, widget in [('원문 언어', self.source), ('번역 언어', self.target), ('원본 인코딩', self.encoding),
                              ('묶음 최대 대사', self.batch), ('컨텍스트 토큰', self.context_tokens), ('최대 출력 토큰', self.tokens), ('응답 제한 시간', self.timeout)]:
@@ -415,6 +443,8 @@ class MainWindow(QMainWindow):
         self.provider.currentIndexChanged.connect(self.update_api_hint)
         self.api_mode.currentIndexChanged.connect(self.update_api_hint)
         self.model.currentTextChanged.connect(self.update_api_hint)
+        self.output_format.currentIndexChanged.connect(self.update_api_hint)
+        self.strip_ass_decoration.toggled.connect(self.update_api_hint)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(api_container)
         right.addTab(scroll, '번역 API')
         self.settings_tabs = right
@@ -424,8 +454,11 @@ class MainWindow(QMainWindow):
         self.output = QLineEdit(); self.output.setPlaceholderText('번역 결과를 저장할 폴더를 선택하세요.')
         self.output_button = button('찾아보기', self.choose_output)
         self.open_button = button('결과 열기', self.open_output)
+        self.data_button = button('데이터 폴더', self.open_data)
+        self.data_button.setToolTip(str(self.data_dir.resolve()))
         output_row.addWidget(self.output, 1); output_row.addWidget(self.output_button); output_row.addWidget(self.open_button)
         layout.addLayout(output_row)
+        output_row.addWidget(self.data_button)
         self.progress_bar = QProgressBar(); self.progress_bar.setRange(0, 10000); self.progress_bar.setValue(0); self.progress_bar.setTextVisible(False)
         layout.addWidget(self.progress_bar)
         self.metrics_label = label('', 'muted'); layout.addWidget(self.metrics_label)
@@ -443,10 +476,13 @@ class MainWindow(QMainWindow):
         footer.addWidget(self.elapsed_label)
         self.stop_button = button('중단', self.stop); self.stop_button.setEnabled(False)
         self.start_button = button('전체 번역 시작', self.start, True)
+        self.restart_button = button('다시 번역하기', lambda: self.start(restart=True))
+        self.restart_button.setToolTip('현재 목록 전체를 처음부터 다시 번역합니다. 기존 번역·요약 기록은 보관하고 새 기록으로 시작합니다. 작품 매칭과 설정은 유지합니다.')
         footer.addWidget(self.stop_button); footer.addWidget(self.start_button)
+        footer.addWidget(self.restart_button)
         layout.addLayout(footer)
         self.mutating_controls = [self.folder_button, self.file_button, self.match_button, self.remove_button,
-                                  self.up, self.down, self.unmatch, self.settings_tabs, self.output, self.output_button]
+                                  self.up, self.down, self.unmatch, self.ocr_button, self.settings_tabs, self.output, self.output_button]
         self.load_settings()
         self.update_api_hint()
         self.refresh()
@@ -454,13 +490,22 @@ class MainWindow(QMainWindow):
 
     def load_settings(self):
         s = self.workspace.settings
+        self.output_format.setCurrentIndex(max(0,self.output_format.findData(s.get('output_format','ass'))))
+        self.strip_ass_decoration.setChecked(s.get('strip_ass_decoration') is True)
         self.hide_readings.setChecked(s.get('hide_readings') is True)
         self.provider.setCurrentIndex(max(0,self.provider.findData(s.get('provider','openai'))))
         self.thinking.setCurrentIndex(max(0,self.thinking.findData(s.get('thinking','none'))))
         self.streaming.setChecked(s.get('stream') is True)
+        self.use_summary.setChecked(s.get('use_summary',True) is True)
         self.temperature.setValue(s.get('temperature',0.1 if s.get('api_mode')=='ja-ko-vn' or 'ja-ko-vn' in s.get('model','') else 0.2))
         self.input_tokens.setValue(s.get('input_tokens',20000)); self.quality_retries.setValue(s.get('quality_retries',2))
-        self.prompt_template.setPlainText(s.get('prompt_template',DEFAULT_TEMPLATE))
+        template = s.get('prompt_template',DEFAULT_TEMPLATE)
+        self.prompt_template.setPlainText(DEFAULT_TEMPLATE if template.strip()==LEGACY_TEMPLATE else template)
+        self.active_prompt_record = None
+        if isinstance(s.get('active_prompt_profile'),dict):
+            from .prompt_library import validate_profile
+            try:self.active_prompt_record=validate_profile(s['active_prompt_profile'])
+            except ValueError:pass
         self.allowed_foreign.setPlainText(s.get('allowed_foreign',''))
         for key, widget in [('url', self.url), ('source', self.source), ('target', self.target), ('output', self.output)]:
             if key in s: widget.setText(str(s[key]))
@@ -473,17 +518,26 @@ class MainWindow(QMainWindow):
         if index >= 0: self.encoding.setCurrentIndex(index)
 
     def settings(self):
-        return dict(provider=self.provider.currentData(),temperature=self.temperature.value(),thinking=self.thinking.currentData(),
-                    stream=self.streaming.isChecked(),input_tokens=self.input_tokens.value(),quality_retries=self.quality_retries.value(),
+        result = dict(run_nonce=self.workspace.settings.get('run_nonce',''),output_format=self.output_format.currentData(),strip_ass_decoration=self.strip_ass_decoration.isChecked(),provider=self.provider.currentData(),temperature=self.temperature.value(),thinking=self.thinking.currentData(),
+                    use_summary=self.use_summary.isChecked(),stream=self.streaming.isChecked(),input_tokens=self.input_tokens.value(),quality_retries=self.quality_retries.value(),
                     prompt_template=self.prompt_template.toPlainText(),allowed_foreign=self.allowed_foreign.toPlainText(),
                     url=self.url.text().strip(), model=self.model.currentText().strip(), key=self.key.text(),
                     api_mode=self.api_mode.currentData(), context_tokens=self.context_tokens.value(), hide_readings=self.hide_readings.isChecked(),
                     source=self.source.text().strip() or 'auto', target=self.target.text().strip(),
                     encoding=self.encoding.currentData(), batch_size=self.batch.value(),
                     max_tokens=self.tokens.value(), timeout=self.timeout.value())
+        active=getattr(self,'active_prompt_record',None)
+        if active and result['prompt_template']==active['anime'] and (active['anime'],active['manga'])!=(DEFAULT_TEMPLATE,MANGA_TEMPLATE):
+            result['manga_prompt_template']=active['manga']
+            result['isolate_prompt_context']=True
+        return result
 
     def save(self):
         settings = self.settings(); settings.pop('key', None); settings['output'] = self.output.text().strip()
+        for key in ('prompt_library','ocr_name_suggestions'):
+            if key in self.workspace.settings:settings[key]=self.workspace.settings[key]
+        active=getattr(self,'active_prompt_record',None)
+        if active and settings['prompt_template']==active['anime']:settings['active_prompt_profile']=active
         self.workspace.settings = settings
         try:
             if self.load_error and self.workspace_path.exists():
@@ -540,7 +594,7 @@ class MainWindow(QMainWindow):
         if path: self.add_paths([path])
 
     def choose_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, '자막 파일 선택', '', 'ASS 자막 (*.ass *.ASS)')
+        paths, _ = QFileDialog.getOpenFileNames(self, '자막 파일 선택', '', 'ASS / 벌룬 원문 TXT (*.ass *.ASS *.txt *.TXT)')
         if paths: self.add_paths(paths)
 
     def choose_output(self):
@@ -550,6 +604,9 @@ class MainWindow(QMainWindow):
     def open_output(self):
         path = Path(self.output.text().strip())
         if self.output.text().strip() and path.is_dir(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+
+    def open_data(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir.resolve())))
 
     def selection_changed(self):
         if self.loading_notes: return
@@ -633,6 +690,48 @@ class MainWindow(QMainWindow):
         self.workspace.entries[i], self.workspace.entries[j] = self.workspace.entries[j], self.workspace.entries[i]
         self.refresh({entry.path}); self.save()
 
+    def review_ocr(self):
+        if self.worker is not None or self.background_tasks: return
+        indices = self.selected_indices()
+        if len(indices) != 1 or Path(self.workspace.entries[indices[0]].path).suffix.lower() != '.txt':
+            self.status.setText('검수할 벌룬 원문 TXT 한 개를 선택하세요.'); return
+        entry = self.workspace.entries[indices[0]]
+        try:
+            config = validate_settings(self.settings())
+            config['ocr_name_suggestions']=self.workspace.settings.get('ocr_name_suggestions',False)
+            if mode_for(config) != 'identified': raise ValueError('벌룬 OCR 검수는 ID 기반 호출 방식에서 사용하세요.')
+            work = self.workspace.works.get(entry.work_id)
+            if work:
+                config.update(work=work.title, notes=('작품 용어집:\n'+work.glossary+'\n'+work.notes).strip(), instructions=work.instructions)
+            from .ocr_desktop import OcrReviewDialog
+            dialog = OcrReviewDialog(entry.path, self.data_dir, config, entry.output, self)
+        except (OSError, ValueError) as exc:
+            self.status.setText(str(exc)); return
+        dialog.exec()
+        if hasattr(dialog,'name_suggestions'):self.workspace.settings['ocr_name_suggestions']=dialog.name_suggestions.isChecked()
+        if dialog.new_output:
+            entry.output = str(dialog.new_output)
+            if entry.output not in self.results: self.results.append(entry.output)
+            self.status.setText('OCR 검수 수정본 저장: '+entry.output)
+        self.save()
+
+    def manage_prompts(self):
+        if self.worker is not None or self.background_tasks:return
+        from .prompt_desktop import PromptLibraryDialog
+        current=dict(id='current',name='현재 편집본',anime=self.prompt_template.toPlainText(),
+                     manga=template_for(dict(self.settings(),input_format='balloon')))
+        active=getattr(self,'active_prompt_record',None)
+        if active and active['anime']==current['anime']:current=dict(active)
+        try:dialog=PromptLibraryDialog(self.workspace.settings.get('prompt_library',[]),current,self)
+        except ValueError as exc:self.status.setText(str(exc));return
+        result=dialog.exec()
+        self.workspace.settings['prompt_library']=dialog.saved
+        if result==QDialog.DialogCode.Accepted:
+            self.active_prompt_record=dialog.selected_profile
+            self.prompt_template.setPlainText(dialog.selected_profile['anime'])
+            self.status.setText('선택한 프롬프트만 적용: '+dialog.selected_profile['name'])
+        self.save()
+
     def background(self, function, on_result, on_error=None):
         task = Task(function, self); self.background_tasks.append(task)
         task.result.connect(on_result)
@@ -652,11 +751,18 @@ class MainWindow(QMainWindow):
 
     def update_api_hint(self, *_):
         try:
+            plain = self.output_format.currentData() != 'ass'
+            self.strip_ass_decoration.setEnabled(not plain)
+            self.format_hint.setText('SRT·SMI: 위치·색상·강조·원본 줄배치를 제거하고 대사와 시간을 저장합니다. 보호 토큰 없이 번역하며 UTF-8로 저장합니다. ASS와 별도 번역으로 시작합니다.' if plain else 'ASS: 원본 타이밍·서식·줄배치를 보존합니다. 문장 내부 보호 토큰도 정확히 검수합니다.')
+            if not plain and self.strip_ass_decoration.isChecked():
+                self.format_hint.setText('ASS 색상·강조 제거: 대사 내 지정 태그만 제거합니다. 위치·크기·너비·줄바꿈과 Style 정의는 유지하며, 기존 ASS 저장분과 별도로 번역합니다.')
             mode = mode_for(self.settings())
+            self.prompt_library_button.setEnabled(mode=='identified')
+            self.use_summary.setEnabled(mode=='identified')
             self.thinking.setEnabled(mode=='identified' and self.provider.currentData()=='polystrata')
             for control in (self.streaming,self.input_tokens,self.quality_retries,self.prompt_template,self.allowed_foreign): control.setEnabled(mode=='identified')
             if mode == 'identified':
-                self.api_hint.setText('고유 ID로 순서와 무관하게 매칭하고 ASS 토큰을 검증합니다. 정상 ID는 저장하고 문제 ID만 문맥과 함께 재번역합니다. 100대사는 상한이며 입력·출력 예산에 따라 조정됩니다. Thinking 제어는 PolyStrata에서만 전송합니다.')
+                self.api_hint.setText(('고유 ID로 순서와 무관하게 매칭하고 대사만 검수합니다. ' if plain else '고유 ID로 순서와 무관하게 매칭하고 ASS 토큰을 검증합니다. ')+'정상 ID는 저장하고 문제 ID만 문맥과 함께 재번역합니다. 100대사는 상한이며 입력·출력 예산에 따라 조정됩니다. Thinking 제어는 PolyStrata에서만 전송합니다.')
                 return
             special = mode == 'ja-ko-vn'
             self.batch.setEnabled(True)
@@ -735,9 +841,10 @@ class MainWindow(QMainWindow):
     def set_busy(self, busy):
         for control in self.mutating_controls: control.setEnabled(not busy)
         self.start_button.setEnabled(not busy); self.stop_button.setEnabled(busy)
+        self.restart_button.setEnabled(not busy)
         self.tree.setEnabled(not busy)
 
-    def start(self):
+    def start(self, restart=False):
         if self.worker is not None or self.background_tasks: return
         try:
             self.workspace.groups(); config = validate_settings(self.settings())
@@ -746,6 +853,10 @@ class MainWindow(QMainWindow):
             output.mkdir(parents=True, exist_ok=True)
         except (ValueError, OSError) as exc:
             self.status.setText(str(exc)); return
+        if restart:
+            nonce=uuid.uuid4().hex
+            self.workspace.settings['run_nonce']=nonce
+            config['run_nonce']=nonce
         for entry in self.workspace.entries: entry.status = '대기'
         self.refresh(); self.save(); self.results = []; self.progress_bar.setValue(0)
         self.worker = TranslationTask(self.workspace, config, self.data_dir, output, self)
@@ -753,6 +864,7 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self.job_error); self.worker.finished.connect(self.job_finished)
         self.run_clock.start(); self.elapsed_label.setVisible(True)
         self.metrics_data = {}; self.metrics_label.setText(''); self.run_log.clear(); self.log_run_event('전체 번역 시작 · 파일을 확인합니다.')
+        if restart:self.log_run_event('다시 번역하기 · 기존 기록은 보관하고 전체 목록을 새로 번역합니다.')
         self.show_elapsed_time(); self.elapsed_timer.start()
         self.set_busy(True); self.status.setText('자막 파일을 확인하고 있습니다…'); self.worker.start()
 
@@ -762,12 +874,13 @@ class MainWindow(QMainWindow):
         if 'index' in data:
             entry = self.workspace.entries[data['index']]
             entry.status = data.get('status', '번역 중'); self.rows[data['index']].setText(2, entry.status)
+            if data.get('output'): entry.output = data['output']
             if data.get('status') == '완료': self.save()
         if 'message' in data:
             self.wait_message = f"{data.get('work', '')} · {data['message']}"
             self.status.setText(self.wait_message)
             if data.get('phase') != 'stream': self.log_run_event(self.wait_message)
-        if data.get('phase') in ('request', 'retry'):
+        if data.get('phase') in ('request', 'retry', 'summary_request'):
             self.request_started = time.monotonic(); self.wait_timer.start()
             self.show_wait_time()
         elif data.get('phase') in ('validated','review','stream','saving'):
@@ -787,7 +900,7 @@ class MainWindow(QMainWindow):
             f"{completed}/{total} 대사 · {100*completed/total if total else 0:.1f}% · "
             f"현재 {d.get('first','–')}–{d.get('last','–')} · {d.get('stage','준비')} · "
             + (f"{rate:.1f} tok/s ({d.get('speed_kind','측정')}) · " if rate is not None else 'tok/s 대기 · ')
-            + ('ETA 추정 '+format_duration(eta) if eta is not None else 'ETA 추정 대기')
+            + ('ETA 추정 '+format_duration(eta) if eta is not None else 'ETA 재계산 대기' if d.get('eta_overdue') else 'ETA 추정 대기')
             + f" · 요청 {d.get('requests',0)} / 재시도 {d.get('retries',0)} / 오류 자막 {d.get('errors',0)}")
 
     def show_wait_time(self):
@@ -861,10 +974,40 @@ def main():
     parser = argparse.ArgumentParser(description='sub2loc 데스크톱 자막 번역기')
     parser.add_argument('--data-dir', type=Path, default=None)
     parser.add_argument('--smoke-test', type=Path, metavar='SCREENSHOT', help='GUI를 열고 스크린샷을 저장한 뒤 종료')
+    parser.add_argument('--smoke-ocr-test', type=Path, metavar='SCREENSHOT', help='모의 TXT의 OCR 검수 창을 API 없이 확인')
+    parser.add_argument('--smoke-prompt-test', type=Path, metavar='SCREENSHOT', help='프롬프트 보관함과 출처별 템플릿을 API 없이 확인')
     args = parser.parse_args()
     app = QApplication(sys.argv[:1]); app.setApplicationName('sub2loc'); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
-    window = MainWindow(args.data_dir); window.show()
-    if args.smoke_test:
+    try:window = MainWindow(args.data_dir)
+    except OSError:
+        QMessageBox.critical(None,'데이터 폴더를 만들 수 없습니다',
+            'EXE 옆 data 폴더에 저장할 수 없습니다. 압축을 풀고 쓰기 가능한 폴더에서 실행하세요. 또는 --data-dir로 저장 위치를 지정하세요.')
+        return 2
+    window.show()
+    if args.smoke_prompt_test:
+        from .prompt_desktop import PromptLibraryDialog
+        dialog=PromptLibraryDialog([],dict(id='current',name='현재',anime=DEFAULT_TEMPLATE,manga=MANGA_TEMPLATE),window)
+        dialog.selector.setCurrentIndex(dialog.selector.findData('kone-mybest'));dialog.show()
+        def finish_prompt():
+            args.smoke_prompt_test.parent.mkdir(parents=True,exist_ok=True)
+            valid=dialog.selector.count()==4 and bool(dialog.manga.toPlainText()) and not dialog.checks['symbols'].isChecked()
+            valid=dialog.grab().save(str(args.smoke_prompt_test)) and valid
+            dialog.close();app.exit(0 if valid else 2)
+        QTimer.singleShot(700,finish_prompt)
+    elif args.smoke_ocr_test:
+        from .ocr_desktop import OcrReviewDialog
+        smoke_temp = tempfile.TemporaryDirectory()
+        source = Path(smoke_temp.name)/'book_source.txt'
+        source.write_text('### page.png\n1. 一緒に一緒に一緒に一緒に\n2. 猫が来た。\n',encoding='utf-8')
+        dialog = OcrReviewDialog(source,Path(smoke_temp.name)/'data',dict(POLYSTRATA),parent=window)
+        dialog.show()
+        def finish_ocr():
+            args.smoke_ocr_test.parent.mkdir(parents=True,exist_ok=True)
+            valid = dialog.tree.topLevelItemCount()==1 and dialog.thinking.currentData()=='low'
+            valid = dialog.grab().save(str(args.smoke_ocr_test)) and valid
+            dialog.close(); smoke_temp.cleanup(); app.exit(0 if valid else 2)
+        QTimer.singleShot(700,finish_ocr)
+    elif args.smoke_test:
         def finish():
             args.smoke_test.parent.mkdir(parents=True, exist_ok=True)
             if not window.grab().save(str(args.smoke_test)):
