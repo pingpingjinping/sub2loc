@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import sys
 from typing import Callable
 from .subtitles import document_for, output_format
 from .api import base_url, OutputLimitError
@@ -19,9 +20,10 @@ def natural_key(value):
 
 
 def default_data_dir():
-    if os.name == 'nt':
-        return Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local')) / 'sub2loc'
-    return Path.home() / '.sub2loc'
+    # Frozen applications must use the executable's location, never cwd or the
+    # PyInstaller extraction/runtime directory. Source runs use the repo root.
+    root = Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else Path(__file__).resolve().parents[1]
+    return root / 'data'
 
 
 @dataclass

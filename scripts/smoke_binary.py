@@ -11,3 +11,7 @@ with tempfile.TemporaryDirectory() as data:
 if not screenshot.is_file() or screenshot.stat().st_size < 1000:
     raise SystemExit('The frozen desktop app did not produce a screenshot.')
 print('Frozen app launch and window rendering passed.')
+subprocess.run([str(binary), '--smoke-test', str(screenshot)], timeout=60, check=True)
+if not (binary.parent / 'data' / 'workspace.json').is_file():
+    raise SystemExit('The default portable data folder was not created next to the EXE.')
+print('Default portable EXE data storage passed.')

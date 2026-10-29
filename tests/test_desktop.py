@@ -130,6 +130,18 @@ class DesktopTests(unittest.TestCase):
         self.window = MainWindow(self.root / 'appdata'); self.window.show()
         self.addCleanup(self.window.close)
 
+    def test_default_portable_storage_does_not_read_or_migrate_appdata(self):
+        executable=self.root/'portable'/'sub2loc.exe'
+        old=self.root/'appdata'/'sub2loc';old.mkdir(parents=True)
+        (old/'workspace.json').write_text('old data must not be read')
+        with patch('sub2loc.workspace.sys.frozen',True,create=True),patch('sub2loc.workspace.sys.executable',str(executable)),patch.dict(os.environ,LOCALAPPDATA=str(old.parent)):
+            window=MainWindow()
+            self.assertEqual(window.data_dir,executable.parent/'data')
+            self.assertEqual(window.load_error,'')
+            window.close()
+            self.assertTrue((executable.parent/'data'/'workspace.json').is_file())
+            self.assertEqual((old/'workspace.json').read_text(),'old data must not be read')
+
     def wait_for(self, condition, timeout=10):
         deadline = time.monotonic() + timeout
         while not condition():

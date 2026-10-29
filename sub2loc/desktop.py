@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import threading
 import time
+import tempfile
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
@@ -260,6 +261,9 @@ class MainWindow(QMainWindow):
     def __init__(self, data_dir=None):
         super().__init__()
         self.data_dir = Path(data_dir or default_data_dir())
+        self.data_dir.mkdir(parents=True,exist_ok=True)
+        # Fail at startup if this installation cannot store its own data.
+        with tempfile.TemporaryFile(dir=self.data_dir):pass
         self.workspace_path = self.data_dir / 'workspace.json'
         self.load_error = ''
         try:
@@ -440,8 +444,11 @@ class MainWindow(QMainWindow):
         self.output = QLineEdit(); self.output.setPlaceholderText('번역 결과를 저장할 폴더를 선택하세요.')
         self.output_button = button('찾아보기', self.choose_output)
         self.open_button = button('결과 열기', self.open_output)
+        self.data_button = button('데이터 폴더', self.open_data)
+        self.data_button.setToolTip(str(self.data_dir.resolve()))
         output_row.addWidget(self.output, 1); output_row.addWidget(self.output_button); output_row.addWidget(self.open_button)
         layout.addLayout(output_row)
+        output_row.addWidget(self.data_button)
         self.progress_bar = QProgressBar(); self.progress_bar.setRange(0, 10000); self.progress_bar.setValue(0); self.progress_bar.setTextVisible(False)
         layout.addWidget(self.progress_bar)
         self.metrics_label = label('', 'muted'); layout.addWidget(self.metrics_label)
@@ -569,6 +576,9 @@ class MainWindow(QMainWindow):
     def open_output(self):
         path = Path(self.output.text().strip())
         if self.output.text().strip() and path.is_dir(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+
+    def open_data(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.data_dir.resolve())))
 
     def selection_changed(self):
         if self.loading_notes: return
@@ -888,7 +898,12 @@ def main():
     parser.add_argument('--smoke-test', type=Path, metavar='SCREENSHOT', help='GUI를 열고 스크린샷을 저장한 뒤 종료')
     args = parser.parse_args()
     app = QApplication(sys.argv[:1]); app.setApplicationName('sub2loc'); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
-    window = MainWindow(args.data_dir); window.show()
+    try:window = MainWindow(args.data_dir)
+    except OSError:
+        QMessageBox.critical(None,'데이터 폴더를 만들 수 없습니다',
+            'EXE 옆 data 폴더에 저장할 수 없습니다. 압축을 풀고 쓰기 가능한 폴더에서 실행하세요. 또는 --data-dir로 저장 위치를 지정하세요.')
+        return 2
+    window.show()
     if args.smoke_test:
         def finish():
             args.smoke_test.parent.mkdir(parents=True, exist_ok=True)
