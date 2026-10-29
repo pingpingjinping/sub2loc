@@ -162,6 +162,8 @@ def write_result(path, raw):
 
 def validate_settings(settings):
     config = dict(settings)
+    if not isinstance(config.get('run_nonce',''),str) or len(config.get('run_nonce',''))>64:
+        raise ValueError('재번역 기록 설정을 확인하세요.')
     if type(config.get('use_summary',False)) is not bool:raise ValueError('누적 문맥 요약 설정을 확인하세요.')
     output_format(config)
     if type(config.get('strip_ass_decoration',False)) is not bool:

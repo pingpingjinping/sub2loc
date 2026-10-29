@@ -103,6 +103,7 @@ class Engine:
             outputs, context, self.last_review = translate(self.root, config, files, cancel, progress, client)
             return outputs, context
         identity = {k: v for k, v in config.items() if k not in ('key', 'api_mode')}
+        if not config.get('run_nonce'):identity.pop('run_nonce',None)
         if subtitle_format == 'ass': identity.pop('output_format',None)
         if not simplified: identity.pop('strip_ass_decoration',None)
         # New chat-only controls must not invalidate unchanged legacy checkpoints.
@@ -126,6 +127,8 @@ class Engine:
             project_key = {'work': project_key, 'subtitle_mode': 'plain-v1'}
         elif simplified:
             project_key = {'work': project_key, 'subtitle_mode': 'ass-clean-v1'}
+        if config.get('run_nonce'):
+            project_key={'work':project_key,'restart':config['run_nonce']}
         project_id = digest(project_key)[:24]
         folder = self.root / project_id
         project_path = folder / 'project.json'

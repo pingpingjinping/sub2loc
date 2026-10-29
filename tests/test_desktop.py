@@ -208,6 +208,16 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(all('번역'.encode() in Path(p).read_bytes() for p in self.window.results))
         self.assertEqual(len(calls), 2)
         self.assertNotIn('private-test-key', self.window.workspace_path.read_text())
+        QTest.mouseClick(self.window.restart_button, Qt.MouseButton.LeftButton)
+        self.wait_for(lambda: self.window.worker is None)
+        self.assertEqual(len(calls),4)
+        self.assertEqual(json.loads(calls[2]['messages'][1]['content'])['previous_context'],'')
+        nonce=self.window.workspace.settings['run_nonce']
+        self.assertTrue(nonce)
+        QTest.mouseClick(self.window.start_button, Qt.MouseButton.LeftButton)
+        self.wait_for(lambda: self.window.worker is None)
+        self.assertEqual(len(calls),4)
+        self.assertEqual(self.window.workspace.settings['run_nonce'],nonce)
 
     def test_output_format_choice_persists_and_is_locked_during_translation(self):
         self.assertEqual(self.window.settings()['output_format'], 'ass')

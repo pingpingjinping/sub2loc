@@ -120,6 +120,7 @@ def _bound(text, size):
 def translate(root, config, files, cancel, progress, client):
     identity = {k: v for k, v in config.items() if k not in ('key', 'api_mode')}
     identity.pop('use_summary',None)  # Keep accepted IDs when enabling context.
+    if not config.get('run_nonce'):identity.pop('run_nonce',None)
     # ASS's implicit/default setting must keep existing checkpoints. SRT and SMI
     # share validated plain-text translations; only the local renderer differs.
     balloon = config.get('input_format')=='balloon'
@@ -129,7 +130,9 @@ def translate(root, config, files, cancel, progress, client):
     if not simplified: identity.pop('strip_ass_decoration', None)
     identity['prompt_template'] = template_for(config)
     identity['pipeline'] = 'identified-balloon-v1' if balloon else 'identified-plain-v1' if plain else 'identified-ass-clean-v1' if simplified else 'identified-v1'
-    folder = Path(root) / digest({'work': config.get('work_id') or config['work'], 'mode': identity['pipeline']})[:24]
+    project_key={'work': config.get('work_id') or config['work'], 'mode': identity['pipeline']}
+    if config.get('run_nonce'):project_key['restart']=config['run_nonce']
+    folder = Path(root) / digest(project_key)[:24]
     run_id = digest([identity, [(n, digest(raw.hex())) for n, raw in files]])
     with project_lock(folder / 'work.lock'):
         return _run(folder, run_id, config, files, cancel, progress, client)

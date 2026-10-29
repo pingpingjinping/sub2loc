@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import tempfile
+import uuid
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
@@ -466,7 +467,10 @@ class MainWindow(QMainWindow):
         footer.addWidget(self.elapsed_label)
         self.stop_button = button('중단', self.stop); self.stop_button.setEnabled(False)
         self.start_button = button('전체 번역 시작', self.start, True)
+        self.restart_button = button('다시 번역하기', lambda: self.start(restart=True))
+        self.restart_button.setToolTip('현재 목록 전체를 처음부터 다시 번역합니다. 기존 번역·요약 기록은 보관하고 새 기록으로 시작합니다. 작품 매칭과 설정은 유지합니다.')
         footer.addWidget(self.stop_button); footer.addWidget(self.start_button)
+        footer.addWidget(self.restart_button)
         layout.addLayout(footer)
         self.mutating_controls = [self.folder_button, self.file_button, self.match_button, self.remove_button,
                                   self.up, self.down, self.unmatch, self.settings_tabs, self.output, self.output_button]
@@ -499,7 +503,7 @@ class MainWindow(QMainWindow):
         if index >= 0: self.encoding.setCurrentIndex(index)
 
     def settings(self):
-        return dict(output_format=self.output_format.currentData(),strip_ass_decoration=self.strip_ass_decoration.isChecked(),provider=self.provider.currentData(),temperature=self.temperature.value(),thinking=self.thinking.currentData(),
+        return dict(run_nonce=self.workspace.settings.get('run_nonce',''),output_format=self.output_format.currentData(),strip_ass_decoration=self.strip_ass_decoration.isChecked(),provider=self.provider.currentData(),temperature=self.temperature.value(),thinking=self.thinking.currentData(),
                     use_summary=self.use_summary.isChecked(),stream=self.streaming.isChecked(),input_tokens=self.input_tokens.value(),quality_retries=self.quality_retries.value(),
                     prompt_template=self.prompt_template.toPlainText(),allowed_foreign=self.allowed_foreign.toPlainText(),
                     url=self.url.text().strip(), model=self.model.currentText().strip(), key=self.key.text(),
@@ -770,9 +774,10 @@ class MainWindow(QMainWindow):
     def set_busy(self, busy):
         for control in self.mutating_controls: control.setEnabled(not busy)
         self.start_button.setEnabled(not busy); self.stop_button.setEnabled(busy)
+        self.restart_button.setEnabled(not busy)
         self.tree.setEnabled(not busy)
 
-    def start(self):
+    def start(self, restart=False):
         if self.worker is not None or self.background_tasks: return
         try:
             self.workspace.groups(); config = validate_settings(self.settings())
@@ -781,6 +786,10 @@ class MainWindow(QMainWindow):
             output.mkdir(parents=True, exist_ok=True)
         except (ValueError, OSError) as exc:
             self.status.setText(str(exc)); return
+        if restart:
+            nonce=uuid.uuid4().hex
+            self.workspace.settings['run_nonce']=nonce
+            config['run_nonce']=nonce
         for entry in self.workspace.entries: entry.status = '대기'
         self.refresh(); self.save(); self.results = []; self.progress_bar.setValue(0)
         self.worker = TranslationTask(self.workspace, config, self.data_dir, output, self)
@@ -788,6 +797,7 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self.job_error); self.worker.finished.connect(self.job_finished)
         self.run_clock.start(); self.elapsed_label.setVisible(True)
         self.metrics_data = {}; self.metrics_label.setText(''); self.run_log.clear(); self.log_run_event('전체 번역 시작 · 파일을 확인합니다.')
+        if restart:self.log_run_event('다시 번역하기 · 기존 기록은 보관하고 전체 목록을 새로 번역합니다.')
         self.show_elapsed_time(); self.elapsed_timer.start()
         self.set_busy(True); self.status.setText('자막 파일을 확인하고 있습니다…'); self.worker.start()
 
