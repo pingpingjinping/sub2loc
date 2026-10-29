@@ -41,5 +41,6 @@ jobs:
             dist/sub2loc-windows-x64.zip
             dist/SHA256SUMS.txt
             dist/windows-smoke.png
+            dist/windows-ocr-smoke.png
           if-no-files-found: error
           retention-days: 90

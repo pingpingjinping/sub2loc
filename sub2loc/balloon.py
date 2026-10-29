@@ -1,6 +1,7 @@
 """BallonsTranslator's numbered page TXT interchange; never guess plain TXT IDs."""
 import re
 from .subtitles import PlainCue
+from .ocr_checks import source_issues
 
 
 class BalloonDocument:
@@ -30,7 +31,7 @@ class BalloonDocument:
                 if not source:continue
                 cue=PlainCue(len(self.cues),0,page['name']+'\0'+str(block['number']),'','','',source,[])
                 cue.page=page['name'];cue.block=block['number']
-                cue.ocr_warnings=['원문 OCR 확인 필요: 깨진 문자·제어문자'] if '\ufffd' in source or re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f]',source) else []
+                cue.ocr_warnings=source_issues(source)
                 block['cue']=cue.id;self.cues.append(cue)
 
     def render(self, translations):

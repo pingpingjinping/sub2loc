@@ -25,7 +25,7 @@ from .connection import test_translation
 from .jako import mode_for
 from .engine import Cancelled
 from .timing import RunClock, format_duration
-from .profiles import POLYSTRATA, DEFAULT_TEMPLATE
+from .profiles import POLYSTRATA, DEFAULT_TEMPLATE, MANGA_TEMPLATE, LEGACY_TEMPLATE
 from .subtitles import FORMATS
 from .workspace import Workspace, Work, default_data_dir, translate_queue, validate_settings
 
@@ -324,7 +324,9 @@ class MainWindow(QMainWindow):
         self.up = button('↑ 위로', lambda: self.move_selected(-1))
         self.down = button('↓ 아래로', lambda: self.move_selected(1))
         self.unmatch = button('매칭 해제', self.clear_match)
+        self.ocr_button = button('벌룬 OCR 검수', self.review_ocr)
         row_actions.addWidget(self.up); row_actions.addWidget(self.down); row_actions.addStretch(); row_actions.addWidget(self.unmatch)
+        row_actions.addWidget(self.ocr_button)
         left_layout.addLayout(row_actions)
         left_layout.addWidget(label('폴더 행을 선택하면 안의 자막 전체에 적용됩니다. 같은 작품은 표시된 파일 순서로 처리합니다.', 'muted'))
         splitter.addWidget(left)
@@ -425,6 +427,11 @@ class MainWindow(QMainWindow):
         advanced_form.addRow('입력 토큰 예산',self.input_tokens)
         advanced_form.addRow('문제 ID 재번역 횟수',self.quality_retries)
         advanced_form.addRow('번역 프롬프트',self.prompt_template)
+        presets = QWidget(); preset_row = QHBoxLayout(presets); preset_row.setContentsMargins(0,0,0,0)
+        self.anime_prompt_button = button('애니 기본 프롬프트', lambda:self.prompt_template.setPlainText(DEFAULT_TEMPLATE))
+        self.manga_prompt_button = button('만화 기본 프롬프트', lambda:self.prompt_template.setPlainText(MANGA_TEMPLATE))
+        preset_row.addWidget(self.anime_prompt_button); preset_row.addWidget(self.manga_prompt_button)
+        advanced_form.addRow('템플릿 적용', presets)
         advanced_form.addRow('허용 문자 표기',self.allowed_foreign)
         for text, widget in [('원문 언어', self.source), ('번역 언어', self.target), ('원본 인코딩', self.encoding),
                              ('묶음 최대 대사', self.batch), ('컨텍스트 토큰', self.context_tokens), ('최대 출력 토큰', self.tokens), ('응답 제한 시간', self.timeout)]:
@@ -473,7 +480,7 @@ class MainWindow(QMainWindow):
         footer.addWidget(self.restart_button)
         layout.addLayout(footer)
         self.mutating_controls = [self.folder_button, self.file_button, self.match_button, self.remove_button,
-                                  self.up, self.down, self.unmatch, self.settings_tabs, self.output, self.output_button]
+                                  self.up, self.down, self.unmatch, self.ocr_button, self.settings_tabs, self.output, self.output_button]
         self.load_settings()
         self.update_api_hint()
         self.refresh()
@@ -490,7 +497,8 @@ class MainWindow(QMainWindow):
         self.use_summary.setChecked(s.get('use_summary',True) is True)
         self.temperature.setValue(s.get('temperature',0.1 if s.get('api_mode')=='ja-ko-vn' or 'ja-ko-vn' in s.get('model','') else 0.2))
         self.input_tokens.setValue(s.get('input_tokens',20000)); self.quality_retries.setValue(s.get('quality_retries',2))
-        self.prompt_template.setPlainText(s.get('prompt_template',DEFAULT_TEMPLATE))
+        template = s.get('prompt_template',DEFAULT_TEMPLATE)
+        self.prompt_template.setPlainText(DEFAULT_TEMPLATE if template.strip()==LEGACY_TEMPLATE else template)
         self.allowed_foreign.setPlainText(s.get('allowed_foreign',''))
         for key, widget in [('url', self.url), ('source', self.source), ('target', self.target), ('output', self.output)]:
             if key in s: widget.setText(str(s[key]))
@@ -666,6 +674,29 @@ class MainWindow(QMainWindow):
         self.workspace.entries[i], self.workspace.entries[j] = self.workspace.entries[j], self.workspace.entries[i]
         self.refresh({entry.path}); self.save()
 
+    def review_ocr(self):
+        if self.worker is not None or self.background_tasks: return
+        indices = self.selected_indices()
+        if len(indices) != 1 or Path(self.workspace.entries[indices[0]].path).suffix.lower() != '.txt':
+            self.status.setText('검수할 벌룬 원문 TXT 한 개를 선택하세요.'); return
+        entry = self.workspace.entries[indices[0]]
+        try:
+            config = validate_settings(self.settings())
+            if mode_for(config) != 'identified': raise ValueError('벌룬 OCR 검수는 ID 기반 호출 방식에서 사용하세요.')
+            work = self.workspace.works.get(entry.work_id)
+            if work:
+                config.update(work=work.title, notes=('작품 용어집:\n'+work.glossary+'\n'+work.notes).strip(), instructions=work.instructions)
+            from .ocr_desktop import OcrReviewDialog
+            dialog = OcrReviewDialog(entry.path, self.data_dir, config, entry.output, self)
+        except (OSError, ValueError) as exc:
+            self.status.setText(str(exc)); return
+        dialog.exec()
+        if dialog.new_output:
+            entry.output = str(dialog.new_output)
+            if entry.output not in self.results: self.results.append(entry.output)
+            self.status.setText('OCR 검수 수정본 저장: '+entry.output)
+        self.save()
+
     def background(self, function, on_result, on_error=None):
         task = Task(function, self); self.background_tasks.append(task)
         task.result.connect(on_result)
@@ -807,6 +838,7 @@ class MainWindow(QMainWindow):
         if 'index' in data:
             entry = self.workspace.entries[data['index']]
             entry.status = data.get('status', '번역 중'); self.rows[data['index']].setText(2, entry.status)
+            if data.get('output'): entry.output = data['output']
             if data.get('status') == '완료': self.save()
         if 'message' in data:
             self.wait_message = f"{data.get('work', '')} · {data['message']}"
@@ -906,6 +938,7 @@ def main():
     parser = argparse.ArgumentParser(description='sub2loc 데스크톱 자막 번역기')
     parser.add_argument('--data-dir', type=Path, default=None)
     parser.add_argument('--smoke-test', type=Path, metavar='SCREENSHOT', help='GUI를 열고 스크린샷을 저장한 뒤 종료')
+    parser.add_argument('--smoke-ocr-test', type=Path, metavar='SCREENSHOT', help='모의 TXT의 OCR 검수 창을 API 없이 확인')
     args = parser.parse_args()
     app = QApplication(sys.argv[:1]); app.setApplicationName('sub2loc'); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
     try:window = MainWindow(args.data_dir)
@@ -914,7 +947,20 @@ def main():
             'EXE 옆 data 폴더에 저장할 수 없습니다. 압축을 풀고 쓰기 가능한 폴더에서 실행하세요. 또는 --data-dir로 저장 위치를 지정하세요.')
         return 2
     window.show()
-    if args.smoke_test:
+    if args.smoke_ocr_test:
+        from .ocr_desktop import OcrReviewDialog
+        smoke_temp = tempfile.TemporaryDirectory()
+        source = Path(smoke_temp.name)/'book_source.txt'
+        source.write_text('### page.png\n1. 一緒に一緒に一緒に一緒に\n2. 猫が来た。\n',encoding='utf-8')
+        dialog = OcrReviewDialog(source,Path(smoke_temp.name)/'data',dict(POLYSTRATA),parent=window)
+        dialog.show()
+        def finish_ocr():
+            args.smoke_ocr_test.parent.mkdir(parents=True,exist_ok=True)
+            valid = dialog.tree.topLevelItemCount()==1 and dialog.thinking.currentData()=='low'
+            valid = dialog.grab().save(str(args.smoke_ocr_test)) and valid
+            dialog.close(); smoke_temp.cleanup(); app.exit(0 if valid else 2)
+        QTimer.singleShot(700,finish_ocr)
+    elif args.smoke_test:
         def finish():
             args.smoke_test.parent.mkdir(parents=True, exist_ok=True)
             if not window.grab().save(str(args.smoke_test)):

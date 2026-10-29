@@ -15,3 +15,9 @@ subprocess.run([str(binary), '--smoke-test', str(screenshot)], timeout=60, check
 if not (binary.parent / 'data' / 'workspace.json').is_file():
     raise SystemExit('The default portable data folder was not created next to the EXE.')
 print('Default portable EXE data storage passed.')
+ocr_screenshot = screenshot.with_name('windows-ocr-smoke.png')
+with tempfile.TemporaryDirectory() as data:
+    subprocess.run([str(binary), '--data-dir', data, '--smoke-ocr-test', str(ocr_screenshot)], timeout=60, check=True)
+if not ocr_screenshot.is_file() or ocr_screenshot.stat().st_size < 1000:
+    raise SystemExit('The frozen OCR review window did not render.')
+print('Frozen OCR review dialog and bundled prompt loading passed (no API).')

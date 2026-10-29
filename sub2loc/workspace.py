@@ -52,6 +52,7 @@ class Entry:
     path: str
     work_id: str = ''
     status: str = '미매칭'
+    output: str = ''
 
 
 @dataclass

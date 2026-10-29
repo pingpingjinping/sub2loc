@@ -12,7 +12,7 @@ from .subtitles import document_for, output_format, output_name
 from .framing import frame_for
 from .response_rows import response_items
 from .engine import atomic_json, digest, Cancelled
-from .profiles import template_for, DEFAULT_TEMPLATE
+from .profiles import template_for
 from .review import inspect_translation, normalize_interjection, structure_issues
 from .timing import ThroughputETA
 from .memory import summary_for, summary_request
@@ -202,7 +202,6 @@ def _run(folder, run_id, config, files, cancel, progress, client):
             if memory:payload['preceding_summary']=dict(through_cue=record['covered'],text=memory,automatically_generated=True)
         # Protocol is not user editable. Translation style lives in a template.
         style = template_for(config)
-        if config.get('input_format')=='balloon' and style==DEFAULT_TEMPLATE:style = style.replace('애니메이션 자막', '만화 말풍선')
         system = style + '\n' + config.get('instructions', '') + '\n' + (PLAIN_PROTOCOL if plain else PROTOCOL)
         return [{'role':'system','content':system}, {'role':'user','content':json.dumps(payload,ensure_ascii=False)}]
     def cost(targets, cues, ids, issues=None):
